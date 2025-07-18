@@ -1,195 +1,1313 @@
-import shutil
+import copy
+import gc
+import json
+import logging
 import os
-import pprint
-from pathlib import Path
-
-import kagglehub
-from sklearn.metrics import balanced_accuracy_score, average_precision_score, roc_auc_score, f1_score
-import pandas as pd
-import torch
-import numpy as np
 import random
 
-from dmimagedetection.test_code.main import runnig_tests
+import kagglehub
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import regex
+import scipy
+import torch
+import torchvision
+import yaml
+from diffusers import DDIMScheduler, StableDiffusionPipeline  # type: ignore
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    f1_score,
+    roc_auc_score,
+)
+from torchvision import transforms
+from tqdm.auto import tqdm
 
-from universalfakedetect.validate import RealFakeDataset
-from universalfakedetect.models import get_model
+CONFIG_ATTRIBUTES_REQUIRE_DENOISE = {
+    "train_samples",
+    "test_samples",
+    "hf_repo",
+    "timesteps",
+    "diffusion_percent",
+}
 
-from aeroblade.src.aeroblade.high_level_funcs import compute_distances
+# Set up logger
+logging.basicConfig(
+    filename="mypipeline.log",
+    encoding="utf-8",
+    filemode="a",
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    force=True,
+)
 
-def run_universal_face_detect(arch, ckpt, result_folder, real_path, fake_path):
-    model = get_model(arch)
-    state_dict = torch.load(ckpt, map_location='cpu')
-    model.fc.load_state_dict(state_dict)
-    model.eval()
-    model.cuda()
+logger = logging.getLogger(__name__)
 
-    torch.manual_seed(0)
-    torch.cuda.manual_seed(0)
-    np.random.seed(0)
-    random.seed(0)
+stdout = logging.StreamHandler()
+logger.addHandler(stdout)
 
-    dataset = RealFakeDataset(
-        real_path=real_path,
-        fake_path=fake_path,
-        data_mode='ours',
-        max_sample=1000,
-        arch=arch,
-        jpeg_quality=None,
-        gaussian_sigma=None
+logger.info("################# Starting mypipeline... #################")
+
+
+def plot_embedding(X_embedded, labels, title="Embedding"):
+    plt.figure(figsize=(6, 6))
+    scatter = plt.scatter(
+        X_embedded[:, 0], X_embedded[:, 1], c=labels, cmap="coolwarm", alpha=0.6
     )
-    loader = torch.utils.data.DataLoader(dataset, batch_size=128, shuffle=False, num_workers=4)
+    plt.legend(*scatter.legend_elements(), title="Class")
+    plt.title(title)
+    plt.xlabel("Dim 1")
+    plt.ylabel("Dim 2")
+    plt.grid(True)
+    plt.show()
+
+
+def band_energy(power, mask):
+    return (power * mask[None, None, :, :]).sum(dim=(-3, -2, -1))
+
+
+def compute_energy(x_fft):
+    """
+    Compute the energy in low, mid, and high frequency bands of the FFT of an image.
+    Args:
+        x_fft (torch.Tensor): FFT of the image tensor, shape (C, H, W).
+    Returns:
+        low_energy (torch.Tensor): Energy in the low frequency band.
+        mid_energy (torch.Tensor): Energy in the mid frequency band.
+        high_energy (torch.Tensor): Energy in the high frequency band.
+    """
+    mag = torch.abs(x_fft)
+    power = mag**2
+
+    # shift zero-frequency to center
+    power = torch.fft.fftshift(power, dim=(-2, -1))
+
+    # define low/mid/high fred masks
+    C, H, W = power.shape
+    yy, xx = torch.meshgrid(
+        torch.arange(H) - H // 2, torch.arange(W) - W // 2, indexing="ij"
+    )
+
+    rr = torch.sqrt(xx**2 + yy**2).to(power.device)  # radial frequency
+    r_norm = rr / rr.max()
+
+    low_mask = r_norm < 0.2
+    mid_mask = (r_norm >= 0.2) & (r_norm < 0.5)
+    high_mask = r_norm >= 0.5
+
+    low_energy = band_energy(power, low_mask)
+    mid_energy = band_energy(power, mid_mask)
+    high_energy = band_energy(power, high_mask)
+
+    return low_energy, mid_energy, high_energy
+
+
+def extract_noise_features(
+    pred_noise: torch.Tensor, noise: torch.Tensor | None, included_features: list[str]
+) -> list[torch.Tensor]:
+    """
+    Extracts features from the predicted noise and optionally from the actual noise.
+    Args:
+        pred_noise (torch.Tensor): The predicted noise tensor, shape (batch_size, channels, height, width).
+        noise (torch.Tensor | None): The actual noise tensor, shape (batch_size, channels, height, width).
+        included_features (list): List of features to extract. Options are:
+            - 'noise_stats': Mean, std, skewness, kurtosis, and L2 norm of the predicted noise.
+            - 'noise_fft': FFT magnitude, phase, and energy in low, mid, and high frequency bands of the predicted noise.
+            - 'residual_stats': Mean, std, skewness, kurtosis, and L2 norm of the residual (predicted noise - actual noise).
+            - 'cos_sim': Cosine similarity between the predicted noise and the actual noise.
+    Returns:
+        list[torch.Tensor]: A list of tensors containing the extracted features for each sample in the batch.
+    """
+    # tensor shape: (batch_size, channels, height, width)
+    assert included_features, "included_features cannot be empty"
+    assert all(
+        [
+            f in ["noise_stats", "noise_fft", "residual_stats", "cos_sim"]
+            for f in included_features
+        ]
+    ), (
+        "included_features must be one of ['noise_stats', 'noise_fft', 'residual_stats', 'cos_sim']"
+    )
+    assert not (
+        noise is None
+        and ("residual_stats" in included_features or "cos_sim" in included_features)
+    ), "residual_stats and cos_sim require noise"
+
+    residual = pred_noise - noise if noise is not None else None
+
+    batch = []
+
+    for i in range(pred_noise.shape[0]):
+        features = []
+
+        if "noise_stats" in included_features:
+            pred_mean = pred_noise[i].mean().item()
+            pred_std = pred_noise[i].std().item()
+            pred_skew = scipy.stats.skew(pred_noise[i].flatten().cpu().numpy()).item()
+            pred_kurtosis = scipy.stats.kurtosis(
+                pred_noise[i].flatten().cpu().numpy()
+            ).item()
+            pred_l2 = torch.linalg.norm(pred_noise[i]).item()
+
+            features += [pred_mean, pred_std, pred_skew, pred_kurtosis, pred_l2]
+
+        if "noise_fft" in included_features:
+            pred_fft = torch.fft.fft2(pred_noise[i], norm="ortho")
+            pred_fft_magnitude = torch.abs(pred_fft).mean().item()
+            pred_fft_phase = torch.angle(pred_fft).mean().item()
+            pred_fft_low_energy, pred_fft_mid_energy, pred_fft_high_energy = (
+                compute_energy(pred_fft)
+            )
+
+            features += [
+                pred_fft_magnitude,
+                pred_fft_phase,
+                pred_fft_low_energy,
+                pred_fft_mid_energy,
+                pred_fft_high_energy,
+            ]
+
+        if "residual_stats" in included_features and residual is not None:
+            residual_mean = residual[i].mean().item()
+            residual_std = residual[i].std().item()
+            residual_skew = scipy.stats.skew(residual[i].flatten().cpu().numpy())
+            residual_kurtosis = scipy.stats.kurtosis(
+                residual[i].flatten().cpu().numpy()
+            )
+            residual_l2 = torch.norm(residual[i]).item()
+
+            features += [
+                residual_mean,
+                residual_std,
+                residual_skew,
+                residual_kurtosis,
+                residual_l2,
+            ]
+
+        if "cos_sim" in included_features and noise is not None:
+            cosine_sim = torch.nn.functional.cosine_similarity(
+                pred_noise[i].flatten(), noise[i].flatten(), dim=0
+            ).item()
+
+            features += [cosine_sim]
+
+        batch.append(torch.tensor(features))
+
+    return batch
+
+
+class MyPipeline:
+    def __init__(
+        self,
+        vae,
+        unet,
+        tokenizer,
+        text_encoder,
+        scheduler,
+        total_timesteps=30,
+        diffusion_percent=0.5,
+        device="cuda",
+    ):
+        """
+        Initializes the pipeline.
+
+        Args:
+            vae (VAE): The variational autoencoder model from Stable Diffusion Pipeline.
+            unet (UNet): The U-Net model for denoising from Stable Diffusion Pipeline.
+            tokenizer (Tokenizer): The tokenizer for text input from Stable Diffusion Pipeline.
+            text_encoder (TextEncoder): The text encoder for generating text embeddings from Stable Diffusion Pipeline.
+            scheduler (Scheduler): The scheduler for controlling the diffusion process from DDIM.
+            total_timesteps (int, optional): The total number of diffusion timesteps. Defaults to 30.
+            diffusion_percent (float, optional): The percentage of timesteps to use for diffusion. Defaults to 0.5.
+            device (str, optional): The device to run the pipeline on. Defaults to 'cuda'.
+        """
+        self.vae = vae.to(device)
+        self.unet = unet.to(device)
+        self.scheduler = scheduler
+        self.device = device
+
+        self.total_timesteps = total_timesteps
+        self.t_start = int(diffusion_percent * total_timesteps)
+
+        self.scheduler.set_timesteps(self.total_timesteps)
+
+        text_encoder = text_encoder.to(device)
+        with torch.no_grad():
+            self.text_embeddings = text_encoder(
+                tokenizer("", return_tensors="pt").input_ids.to(device)
+            )[0]
+
+    def __call__(self, batch: torch.Tensor):
+        """
+        Runs the pipeline on a batch of images.
+        Args:
+            batch (Tensor): A batch of images, shape (batch_size, channels, height, width).
+        Returns:
+            tuple: A tuple containing:
+                - pred_noises_list (list[Tensor]): List of predicted noises for each timestep.
+                - noises_list (list[Tensor]): List of input noises for each timestep.
+        """
+        batch = batch.to(self.device)
+
+        # Prepare text embeddings for the batch
+        batch_text_embeddings = self.text_embeddings.repeat(batch.shape[0], 1, 1)
+
+        # Encode the image using VAE
+        with torch.no_grad():
+            vae_output = self.vae.encode(batch)
+
+        latents = vae_output.latent_dist.sample() * self.vae.config.scaling_factor
+
+        # Add noise to the latents
+        noises_list = []
+        latents_list = []
+        noise = torch.randn_like(latents).to(self.device)
+        for t in self.scheduler.timesteps[self.t_start :]:
+            noises_list.append(noise)
+            noisy_latents = self.scheduler.add_noise(latents, noise, t)
+            latents_list.append(noisy_latents)
+
+        pred_noises_list = []
+        for t, lats in tqdm(
+            zip(self.scheduler.timesteps[self.t_start :], latents_list),
+            total=len(latents_list),
+            desc="Denoising",
+            leave=False,
+        ):
+            with torch.no_grad():
+                noises_pred = self.unet(lats, t, batch_text_embeddings).sample
+                pred_noises_list.append(noises_pred)
+
+        return pred_noises_list, noises_list
+
+    def extract_features(
+        self,
+        pred_noises_list,
+        noises_list,
+        included_features=["noise_stats", "noise_fft", "residual_stats", "cos_sim"],
+    ):
+        """
+        Extracts features from the predicted noises and actual noises.
+
+        Caution: This method assumes that the 'pred_noises_list' and 'noises_list' are of the same batch. This method will
+        transform the input from a Tensor for each batch to a Tensor for each sample in the batch.
+
+        Preferably, the input should be the output of the '__call__' method of this class for each invocation.
+        Args:
+            pred_noises_list (list[Tensor]): List of predicted noises for each timestep.
+            noises_list (list[Tensor]): List of actual noises for each timestep.
+            included_features (list): List of features to extract. Options are:
+                - 'noise_stats': Mean, std, skewness, kurtosis, and L2 norm of the predicted noise.
+                - 'noise_fft': FFT magnitude, phase, and energy in low, mid, and high frequency bands of the predicted noise.
+                - 'residual_stats': Mean, std, skewness, kurtosis, and L2 norm of the residual (predicted noise - actual noise).
+                - 'cos_sim': Cosine similarity between the predicted noise and the actual noise.
+        Returns:
+            list[Tensor]: A list of tensors containing the sequences of extracted features for each sample in the batch
+        """
+        extracted_features = []
+
+        if not noises_list:
+            noises_list = [None] * len(pred_noises_list)
+
+        for pred_noises, noises in zip(pred_noises_list, noises_list):
+            features = extract_noise_features(pred_noises, noises, included_features)
+            extracted_features.append(features)
+
+        extracted_features = zip(*extracted_features)
+        extracted_features = [torch.stack(feature) for feature in extracted_features]
+        # extracted_features = torch.stack(extracted_features)
+
+        return extracted_features
+
+
+class LSTMClassifier(torch.nn.Module):
+    def __init__(self, input_size, hidden_size=64, num_layers=1, num_classes=2):
+        super().__init__()
+        self.lstm = torch.nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=0.2 if num_layers > 1 else 0,
+        )
+        self.dropout = torch.nn.Dropout(0.2)
+        self.fc = torch.nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        x, _ = self.lstm(x)
+        x = x[:, -1, :]
+        x = self.dropout(x)
+        logits = self.fc(x)
+        return logits
+
+    def embed(self, x):
+        x, _ = self.lstm(x)
+        x = x[:, -1, :]
+        return x
+
+
+class GRUClassifier(torch.nn.Module):
+    def __init__(self, input_size, hidden_size=64, num_layers=1, num_classes=2):
+        super().__init__()
+        self.gru = torch.nn.GRU(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=0.2 if num_layers > 1 else 0,
+        )
+        self.dropout = torch.nn.Dropout(0.2)
+        self.fc = torch.nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        x, _ = self.gru(x)
+        x = x[:, -1, :]
+        x = self.dropout(x)
+        logits = self.fc(x)
+        return logits
+
+    def embed(self, x):
+        x, _ = self.gru(x)
+        x = x[:, -1, :]
+        return x
+
+
+class TransformerClassifier(torch.nn.Module):
+    def __init__(self, input_size, hidden_size=64, num_layers=4, num_classes=2):
+        super().__init__()
+        self.projector = torch.nn.Linear(input_size, hidden_size)
+        encoder_layer = torch.nn.TransformerEncoderLayer(
+            d_model=hidden_size, nhead=8, batch_first=True
+        )
+        self.transformer = torch.nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers
+        )
+        self.dropout = torch.nn.Dropout(0.2)
+        self.fc = torch.nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        x = self.projector(x)
+        x = self.transformer(x)
+        x = x[:, -1, :]
+        x = self.dropout(x)
+        logits = self.fc(x)
+        return logits
+
+    def embed(self, x):
+        x = self.projector(x)
+        x = self.transformer(x)
+        x = x[:, -1, :]
+        return x
+
+
+def download_and_prepare_data(num_train_samples=400, num_test_samples=100):
+    # Download the dataset from Kaggle
+    logger.info("Downloading dataset from Kaggle...")
+    datapath = kagglehub.dataset_download("yangsangtai/tiny-genimage")
+
+    # Symlinks data to a new structure
+    logger.info("Symlinks data to a new structure at 'data/train' and 'data/val'...")
+
+    for model_dir in os.listdir(datapath):
+        for split in ["train", "val"]:
+            for subdir, newname in [("nature", "0_real"), ("ai", "1_fake")]:
+                os.makedirs(f"data/{split}/{model_dir}/{newname}", exist_ok=True)
+
+                for file in os.listdir(f"{datapath}/{model_dir}/{split}/{subdir}"):
+                    try:
+                        os.symlink(
+                            f"{datapath}/{model_dir}/{split}/{subdir}/{file}",
+                            f"data/{split}/{model_dir}/{newname}/{file}",
+                        )
+                    except FileExistsError:
+                        pass
+
+    # Join all real images and fake images into 'data_aio'
+    logger.info("Joining all real and fake images into 'data_aio'...")
+
+    for split in ["train", "val"]:
+        for model_dir in os.listdir(f"data/{split}"):
+            for class_dir in ["0_real", "1_fake"]:
+                os.makedirs(f"data_aio/{split}/{class_dir}", exist_ok=True)
+
+                for file in os.listdir(f"data/{split}/{model_dir}/{class_dir}"):
+                    try:
+                        os.symlink(
+                            os.readlink(f"data/{split}/{model_dir}/{class_dir}/{file}"),
+                            f"data_aio/{split}/{class_dir}/{model_dir}_{file}",
+                        )
+                    except FileExistsError:
+                        pass
+
+    # Create a smaller dataset with a specified number of samples
+    num_samples = (num_train_samples + num_test_samples) * len(os.listdir(datapath))
+
+    logger.info(f"Creating a smaller dataset with {num_samples} samples...")
+
+    if num_samples > 0:
+        for model_dir in os.listdir(datapath):
+            for split in ["train", "val"]:
+                for subdir, newname in [("nature", "0_real"), ("ai", "1_fake")]:
+                    os.makedirs(
+                        f"data_{num_samples}/{split}/{model_dir}/{newname}",
+                        exist_ok=True,
+                    )
+
+                    random.seed(42)  # For reproducibility
+                    random_files = random.sample(
+                        os.listdir(f"{datapath}/{model_dir}/{split}/{subdir}"),
+                        (num_train_samples if split == "train" else num_test_samples)
+                        // 2,
+                    )
+
+                    for file in random_files:
+                        try:
+                            os.symlink(
+                                f"{datapath}/{model_dir}/{split}/{subdir}/{file}",
+                                f"data_{num_samples}/{split}/{model_dir}/{newname}/{file}",
+                            )
+                        except FileExistsError:
+                            pass
+
+        for split in ["train", "val"]:
+            for model_dir in os.listdir(f"data_{num_samples}/{split}"):
+                for class_dir in ["0_real", "1_fake"]:
+                    os.makedirs(
+                        f"data_aio_{num_samples}/{split}/{class_dir}", exist_ok=True
+                    )
+
+                    for file in os.listdir(
+                        f"data_{num_samples}/{split}/{model_dir}/{class_dir}"
+                    ):
+                        try:
+                            os.symlink(
+                                os.readlink(
+                                    f"data_{num_samples}/{split}/{model_dir}/{class_dir}/{file}"
+                                ),
+                                f"data_aio_{num_samples}/{split}/{class_dir}/{model_dir}_{file}",
+                            )
+                        except FileExistsError:
+                            pass
+
+    return (
+        "data",
+        (f"data_{num_samples}" if num_samples > 0 else None),
+        "data_aio",
+        (f"data_aio_{num_samples}" if num_samples > 0 else None),
+    )
+
+
+def prepare_pipeline(
+    hf_repo="CompVis/stable-diffusion-v1-4",
+    total_timesteps=30,
+    diffusion_percent=0.5,
+    device="cuda",
+):
+    """Prepares the Stable Diffusion pipeline with the specified parameters.
+    Args:
+        hf_repo (str): The Hugging Face repository to load the Stable Diffusion model from.
+        total_timesteps (int): The total number of diffusion timesteps. Defaults to 30.
+        diffusion_percent (float): The percentage of timesteps to use for diffusion. Defaults to 0.5.
+        device (str): The device to run the pipeline on. Defaults to 'cuda'.
+    Returns:
+        MyPipeline: An instance of the MyPipeline class with the prepared models and configurations.
+    """
+    logger.info(
+        f"Preparing pipeline with repo {hf_repo}, total_timesteps={total_timesteps}, diffusion_percent={diffusion_percent}, device={device}"
+    )
+
+    pipeline = StableDiffusionPipeline.from_pretrained(hf_repo)
+    scheduler = DDIMScheduler.from_pretrained(hf_repo, subfolder="scheduler")
+    vae = pipeline.vae.to(device)
+    unet = pipeline.unet.to(device)
+    tokenizer = pipeline.tokenizer
+    text_encoder = pipeline.text_encoder.to(device)
+
+    return MyPipeline(
+        vae,
+        unet,
+        tokenizer,
+        text_encoder,
+        scheduler,
+        total_timesteps,
+        diffusion_percent,
+        device,
+    )
+
+
+def prepare_dataloader(folder):
+    """Prepares a DataLoader for the specified folder containing images.
+    Args:
+        folder (str): The path to the folder containing images.
+    Returns:
+        DataLoader: A PyTorch DataLoader for the images in the specified folder.
+    """
+    logger.info(f"Preparing DataLoader for folder: {folder}")
+    transform = transforms.Compose(
+        [
+            transforms.Resize((512, 512)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5]),
+            transforms.ConvertImageDtype(torch.float32),
+        ]
+    )
+
+    dataset = torchvision.datasets.ImageFolder(root=folder, transform=transform)
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=8,
+    )
+
+    return dataloader
+
+
+def run_pipeline_denoise(pipeline, dataloader):
+    """Runs the pipeline to denoise images in the DataLoader.
+    Args:
+        pipeline: The pipeline to use for denoising.
+        dataloader: The DataLoader containing the images to denoise.
+    Returns:
+        tuple: A tuple containing:
+            - all_pred_noises_and_noises (list): List of tuples containing predicted noises and actual noises for each batch.
+            - all_labels (list): List of labels for each batch.
+    """
+
+    logger.info("Running pipeline to denoise images...")
+
+    all_pred_noises_and_noises = []
+    all_labels = []
+
+    for batch, labels in tqdm(dataloader):
+        pred_noises_list, noises_list = pipeline(batch)
+        all_pred_noises_and_noises.append((pred_noises_list, noises_list))
+        all_labels.append(labels)
+
+    return all_pred_noises_and_noises, all_labels
+
+
+def run_pipeline_extract_features(
+    pipeline: MyPipeline, all_pred_noises_and_noises, included_features
+):
+    """Extracts features from the predicted noises and actual noises using the pipeline.
+    Args:
+        pipeline (MyPipeline): The pipeline to use for feature extraction.
+        all_pred_noises_and_noises (list): List of tuples containing predicted noises and actual noises for each batch.
+        included_features (list): List of features to include in the extraction.
+    Returns:
+        list: A list of tensors containing the extracted features for each sample in the batch.
+    """
+
+    logger.info("Extracting features from predicted noises and actual noises...")
+
+    all_features = []
+
+    try:
+        for pred_noises_list, noises_list in all_pred_noises_and_noises:
+            features = pipeline.extract_features(
+                pred_noises_list, noises_list, included_features
+            )
+            all_features.extend(features)
+
+    except Exception as e:
+        logger.error(f"Error extracting features: {e}")
+
+    return all_features
+
+
+def train_classifier(
+    classifier,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    batch_size=8,
+    epochs=50,
+    lr=1e-3,
+    weight_decay=1e-5,
+    device="cuda",
+):
+    """Trains a classifier on the provided training data.
+    Args:
+        classifier: The classifier model to train.
+        X_train: The training features.
+        y_train: The training labels.
+        X_val: The validation features.
+        y_val: The validation labels.
+        batch_size: The batch size for training.
+        epochs: The number of training epochs.
+        lr: The learning rate.
+        weight_decay: The weight decay for the optimizer.
+        device: The device to train on (e.g., 'cuda' or 'cpu').
+    Returns:
+        tuple: A tuple containing:
+            - The trained classifier model.
+            - The state dictionary of the best model.
+    """
+
+    logger.info(
+        f"Training classifier with batch_size={batch_size}, epochs={epochs}, lr={lr}, weight_decay={weight_decay}, device={device}"
+    )
+
+    classifier.to(device)
+
+    optimizer = torch.optim.Adam(
+        classifier.parameters(), lr=lr, weight_decay=weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-5, cooldown=3
+    )
+    criterion = torch.nn.CrossEntropyLoss()
+
+    best_model_state_dict = None
+    best_eval_loss = float("inf")
+
+    for epoch in range(epochs):
+        classifier.train()
+
+        running_loss = 0
+        correct = 0
+        total = 0
+        is_best = False
+
+        for i in range(0, X_train.shape[0], batch_size):
+            batch = X_train[i : i + batch_size].to(device).to(torch.float32)
+            labels = y_train[i : i + batch_size].to(device)
+
+            logits = classifier(batch)
+            loss = criterion(logits, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * batch.size(0)
+
+            preds = logits.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+        with torch.no_grad():
+            classifier.eval()
+
+            val_running_loss = 0
+            val_correct = 0
+            val_total = 0
+
+            for i in tqdm(range(0, X_val.shape[0], batch_size), leave=False):
+                batch = X_val[i : i + batch_size].to(device).to(torch.float32)
+                labels = y_val[i : i + batch_size].to(device)
+
+                logits = classifier(batch)
+                val_loss = criterion(logits, labels)
+
+                val_running_loss += val_loss.item() * batch.size(0)
+
+                preds = logits.argmax(dim=1)
+                val_correct += (preds == labels).sum().item()
+                val_total += labels.size(0)
+
+        scheduler.step(val_running_loss / val_total)
+
+        if val_running_loss / val_total < best_eval_loss:
+            best_eval_loss = val_running_loss / val_total
+            best_model_state_dict = copy.deepcopy(classifier.state_dict().copy())
+            is_best = True
+
+        logger.info(
+            f"Epoch {epoch + 1:>2}: Loss = {running_loss / total:.6f}, Accuracy = {correct / total:.6f}, Val Loss = {val_running_loss / val_total:.6f}, Val Accuracy = {val_correct / val_total:.6f}, LR = {scheduler.get_last_lr()[0]:e}{', New best' if is_best else ''}"
+        )
+
+    assert best_model_state_dict is not None, (
+        "Training failed, either epochs == 0 or data is empty. No model was trained."
+    )
+    return classifier, best_model_state_dict
+
+
+def evaluate_classifier(classifier, X_test, y_test, batch_size=8, device="cuda"):
+    """Evaluates the classifier on the test data.
+    Args:
+        classifier (torch.nn.Module): The trained classifier.
+        X_test (torch.Tensor): The test features.
+        y_test (torch.Tensor): The test labels.
+        batch_size (int): The batch size for evaluation.
+        device (str): The device to run the evaluation on (e.g., 'cuda' or 'cpu').
+    Returns:
+        dict: A dictionary containing the classification report with precision, recall, f1-score, and support for each class.
+    """
+
+    logger.info(f"Evaluating classifier with batch_size={batch_size}, device={device}")
+
+    classifier.to(device)
+    classifier.eval()
+
+    all_preds = []
+    all_labels = []
+    all_preds_probs = []
 
     with torch.no_grad():
-        y_true, y_pred = [], []
-        for img, label in loader:
-            in_tens = img.cuda()
+        for i in range(0, X_test.shape[0], batch_size):
+            batch = X_test[i : i + batch_size].to(device).to(torch.float32)
+            labels = y_test[i : i + batch_size].to(device)
 
-            y_pred.extend(model(in_tens).sigmoid().flatten().tolist())
-            y_true.extend(label.flatten().tolist())
+            logits = classifier(batch)
+            preds = logits.argmax(dim=1)
 
-        y_true, y_pred = np.array(y_true), np.array(y_pred)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            all_preds_probs.extend(logits.softmax(dim=1)[:, 1].cpu().numpy())
 
-    return y_true, y_pred
+    return accuracy_report(
+        y_true=np.array(all_labels),
+        y_pred=np.array(all_preds),
+        y_pred_probs=np.array(all_preds_probs),
+    )
 
 
-def run_evaluation_metrics(y_true, y_score, to_y_pred=lambda x: x > 0.5):
-    y_pred = to_y_pred(y_score)
+def accuracy_report(y_true, y_pred, y_pred_probs=None):
+    """
+    Generates a report containing accuracy for each class, overall accuracy, and weighted F1 score.
+    Args:
+        y_true (list or np.ndarray): Ground truth labels.
+        y_pred (list or np.ndarray): Predicted labels.
+    Returns:
+        dict: A dictionary containing accuracy for each class, overall accuracy, and weighted F1 score.
+    """
+    unique_classes = np.unique(y_true)
+    accuracy_per_class = {}
+    for cls in unique_classes:
+        cls_indices = np.where(y_true == cls)[0]
+        accuracy_per_class[f"accuracy_{cls}"] = accuracy_score(
+            y_true[cls_indices], y_pred[cls_indices]
+        )
+
+    total_accuracy = accuracy_score(y_true, y_pred)
+
+    weighted_f1_score = f1_score(y_true, y_pred, average="weighted")
+
+    auc = roc_auc_score(y_true, y_pred_probs) if y_pred_probs is not None else None
+    average_precision = (
+        average_precision_score(y_true, y_pred_probs)
+        if y_pred_probs is not None
+        else None
+    )
+
     return {
-        'acc': balanced_accuracy_score(y_true, y_pred),
-        'acc_fake': balanced_accuracy_score(y_true[y_true == 1], y_pred[y_true == 1]),
-        'acc_real': balanced_accuracy_score(y_true[y_true == 0], y_pred[y_true == 0]),
-        'auc': roc_auc_score(y_true, y_score),
-        'ap': average_precision_score(y_true, y_score),
-        'f1': f1_score(y_true, y_pred),
+        **accuracy_per_class,
+        "accuracy": total_accuracy,
+        "f1": weighted_f1_score,
+        "auc": auc,
+        "map": average_precision,
     }
 
-def main():
-    datapath = kagglehub.dataset_download("yangsangtai/tiny-genimage")
-    print(f"Dataset downloaded to: {datapath}")
 
-    os.makedirs('data/0_real', exist_ok=True)
-    os.makedirs('data/1_fake', exist_ok=True)
+def visualise_tsne_pca(classifier, X, y, batch_size=32, device="cuda"):
+    """
+    Visualizes the embeddings of the classifier using t-SNE or PCA.
+    Args:
+        classifier (torch.nn.Module): The trained classifier.
+        X (torch.Tensor): The input data for visualization.
+        y (torch.Tensor): The labels for the input data.
+        device (str): The device to run the classifier on. Defaults to 'cuda'.
+    """
+    classifier.to(device)
+    classifier.eval()
 
-    for dir in os.listdir(datapath):
-        for file in os.listdir(f'{datapath}/{dir}/val/real'):
-            shutil.copy(f'{datapath}/{dir}/val/real/{file}', f'data/0_real/{dir}_{file}')
-        for file in os.listdir(f'{datapath}/{dir}/val/ai'):
-            shutil.copy(f'{datapath}/{dir}/val/ai/{file}', f'data/1_fake/{dir}_{file}')
+    embeddings = []
+    labels = []
 
-    os.makedirs('data_1000/0_real', exist_ok=True)
-    os.makedirs('data_1000/1_fake', exist_ok=True)
+    with torch.no_grad():
+        for i in range(0, X.shape[0], batch_size):
+            batch = X[i : i + batch_size].to(device).to(torch.float32)
+            labels = y[i : i + batch_size].to(device)
 
-    random.seed(42)  # For reproducibility
-    random_1000_real = random.sample(os.listdir('data/0_real'), 1000)
-    random_1000_fake = random.sample(os.listdir('data/1_fake'), 1000)
-    for file in random_1000_real:
-        shutil.copy(f'data/0_real/{file}', f'data_1000/0_real/{file}')
-    for file in random_1000_fake:
-        shutil.copy(f'data/1_fake/{file}', f'data_1000/1_fake/{file}')
+            embs = classifier.embed(batch)
+            embeddings.extend(embs.cpu().numpy())
+            labels.extend(labels.cpu().numpy())
 
-    # ---------------- #
-    # DMimageDetection #
-    # ---------------- #
+    embeddings = np.array(embeddings)
+    labels = np.array(labels)
 
-    os.makedirs('output/dmid', exist_ok=True)
+    pca = PCA(n_components=2)
+    tsne = TSNE(n_components=2, random_state=42)
 
-    dmid_data = {'src': []}
-    for dir in os.listdir('data'):
-        for file in os.listdir(f'data/{dir}'):
-            dmid_data['src'].append(f'{dir}/{file}')
-    pd.DataFrame(dmid_data).to_csv('dmid_data.csv', index=False)
+    X_pca = pca.fit_transform(embeddings)
+    X_tsne = tsne.fit_transform(embeddings)
 
-    runnig_tests(data_path="data/", output_dir="output/dmid/", weights_dir="weights/", csv_file="dmid_data.csv")
+    plot_embedding(X_pca, labels, title="PCA Visualization")
+    plot_embedding(X_tsne, labels, title="t-SNE Visualization")
 
-    df_dmid_real = pd.read_csv('output/dmid/0_real/0_real.csv')
-    df_dmid_fake = pd.read_csv('output/dmid/1_fake/1_fake.csv')
 
-    dmid_models = ['Grag2021_progan', 'Grag2021_latent']
+def get_folder(all_folder, config_mode):
+    match config_mode:
+        case "data":
+            return all_folder[0]
+        case "data_x":
+            return all_folder[1]
+        case "data_aio":
+            return all_folder[2]
+        case "data_aio_x":
+            return all_folder[3]
 
-    df_dmid = pd.concat([df_dmid_real, df_dmid_fake], ignore_index=True)
 
-    dmid_scores = df_dmid[dmid_models[0]].to_numpy()
-    dmid_labels = df_dmid['label'].to_numpy()
-    dmid_metrics = run_evaluation_metrics(dmid_labels, dmid_scores)
-    print("DMimageDetection Metrics:")
-    pprint.pprint(dmid_metrics)
-    pd.DataFrame(dmid_metrics, index=[0]).to_csv('output/dmid/dmid_metrics.csv', index=False)
+def set_random_seed(seed):
+    """Sets the random seed for reproducibility.
+    Args:
+        seed (int): The seed value to set.
+    """
+    logger.info(f"Setting random seed: {seed}")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-    ganid_scores = df_dmid[dmid_models[1]].to_numpy()
-    ganid_metrics = run_evaluation_metrics(dmid_labels, ganid_scores)
-    print("GANimageDetection Metrics:")
-    pprint.pprint(ganid_metrics)
-    pd.DataFrame(ganid_metrics, index=[0]).to_csv('output/dmid/ganid_metrics.csv', index=False)
 
-    # ------------------- #
-    # UniversalFaceDetect #
-    # ------------------- #
+def merge_configs(base_config, experiment_config):
+    """Merges the base configuration with the experiment-specific configuration.
+    Args:
+        base_config (dict): The base configuration dictionary.
+        experiment_config (dict): The experiment-specific configuration dictionary.
+    Returns:
+        dict: The merged configuration dictionary.
+    """
+    merged_config = copy.deepcopy(base_config)
+    merged_config.update(experiment_config)
+    return merged_config
 
-    os.makedirs('output/ufd', exist_ok=True)
 
-    ufd_true, ufd_score = run_universal_face_detect(
-        arch='CLIP:ViT-L/14',
-        ckpt='universalfakedetect/pretrained_weights/fc_weights.pth',
-        result_folder='output/ufd',
-        real_path='data/0_real/',
-        fake_path='data/1_fake/'
+def normalise_features(features):
+    """Normalizes the features by subtracting the mean and dividing by the standard deviation.
+    Args:
+        features (torch.Tensor): The features to normalize, shape (batch_size, num_features).
+    Returns:
+        torch.Tensor: The normalized features.
+    """
+    mean = features.mean(dim=(0, 1))
+    std = features.std(dim=(0, 1))
+    return (features - mean[None, None, :]) / (
+        std[None, None, :] + 1e-8
+    )  # Add small value to avoid division by zero
+
+
+def get_classifier(
+    classifier_type, input_size, hidden_size=64, num_layers=1, num_classes=2
+):
+    match classifier_type.lower():
+        case "lstm":
+            return LSTMClassifier(input_size, hidden_size, num_layers, num_classes)
+        case "gru":
+            return GRUClassifier(input_size, hidden_size, num_layers, num_classes)
+        case "transformer":
+            return TransformerClassifier(
+                input_size, hidden_size, num_layers, num_classes
+            )
+        case _:
+            raise ValueError(f"Unknown classifier type: {classifier_type}")
+
+
+def run_denoise(config, train_dataloader, val_dataloader):
+    """Runs the denoising process with the given configuration.
+    Args:
+        config (dict): A configuration dictionary containing all necessary parameters.
+    """
+    logger.info("Running denoising...")
+
+    # Set random seeds for reproducibility
+    set_random_seed(config["seed"])
+
+    # Initialize pipeline
+    pipeline = prepare_pipeline(
+        hf_repo=config["hf_repo"],
+        total_timesteps=config["timesteps"],
+        diffusion_percent=config["diffusion_percent"],
+        device=config["device"],
     )
 
-    ufd_metrics = run_evaluation_metrics(ufd_true, ufd_score)
-    print("UniversalFaceDetect Metrics:")
-    pprint.pprint(ufd_metrics)
-    pd.DataFrame(ufd_metrics).to_csv('output/ufd/ufd_metrics.csv', index=False)
-
-    # ---- #
-    # DIRE #
-    # ---- #
-
-    # os.environ["CUDA_VISIBLE_DEVICES"]="0"
-    # os.environ["NCCL_P2P_DISABLE"]="1"
-
-    # # !mpiexec --allow-run-as-root python dire/guided-diffusion/compute_dire.py
-    # #          --model_path /content/DIRE/256x256_diffusion_uncond.pt --batch_size 16 --num_samples 1000 \
-    # #          --timestep_respacing ddim20 --use_ddim True \
-    # #          --images_dir /content/data_1000 --recons_dir /content/recons --dire_dir /content/dires \
-    # #          --attention_resolutions 32,16,8 --class_cond False --diffusion_steps 1000 \
-    # #          --dropout 0.1 --image_size 256 --learn_sigma True --noise_schedule linear --num_channels 256 \
-    # #          --num_head_channels 64 --num_res_blocks 2 --resblock_updown True --use_fp16 True --use_scale_shift_norm True
-
-    # --------- #
-    # AEROBLADE #
-    # --------- #
-    import torchvision.transforms.v2 as tf
-
-    distances = compute_distances(
-        dirs=[Path('data/0_real'), Path('data/1_fake')],
-        transforms=[tf.Compose([tf.Resize(512), tf.CenterCrop(512)])],
-        repo_ids=[
-            "CompVis/stable-diffusion-v1-1",
-            "stabilityai/stable-diffusion-2-base",
-            "kandinsky-community/kandinsky-2-1",
-        ],
-        distance_metrics=['lpips_vgg_2'],
-        amount=None,
-        reconstruction_root=Path('aeroblade_reconstructions'),
-        seed=1,
-        batch_size=4,
-        num_workers=2,
+    # Load and preprocess data
+    train_all_pred_noises_and_noises, train_all_labels = run_pipeline_denoise(
+        pipeline, train_dataloader
+    )
+    val_all_pred_noises_and_noises, val_all_labels = run_pipeline_denoise(
+        pipeline, val_dataloader
     )
 
-    aeroblade_pred_real = distances[distances['dir'] == 'data/0_real'].distance.to_numpy()
-    aeroblade_pred_fake = distances[distances['dir'] == 'data/1_fake'].distance.to_numpy()
-    aeroblade_scores = np.concatenate([aeroblade_pred_real, aeroblade_pred_fake])
-    aeroblade_labels = np.concatenate([np.zeros_like(aeroblade_pred_real), np.ones_like(aeroblade_pred_fake)])
+    return (
+        pipeline,
+        train_all_pred_noises_and_noises,
+        train_all_labels,
+        val_all_pred_noises_and_noises,
+        val_all_labels,
+    )
 
-    aeroblade_metrics = run_evaluation_metrics(aeroblade_labels, aeroblade_scores)
-    print("AEROBLADE Metrics:")
-    pprint.pprint(aeroblade_metrics)
-    pd.DataFrame(aeroblade_metrics).to_csv('output/aeroblade/aeroblade_metrics.csv', index=False)
 
-    # ---- #
-    # DRCT #
-    # ---- #
+def run_extract_features_and_evaluate(
+    config,
+    pipeline,
+    train_all_pred_noises_and_noises,
+    train_all_labels,
+    val_all_pred_noises_and_noises,
+    val_all_labels,
+    test_all_pred_noises_and_noises=None,
+    test_all_labels=None,
+):
+    # Extract features
+    included_features = config["included_features"]
+
+    train_features = run_pipeline_extract_features(
+        pipeline, train_all_pred_noises_and_noises, included_features
+    )
+    train_features_ts = torch.stack(train_features)
+    train_labels_ts = torch.concat(train_all_labels)
+
+    train_features_mean = train_features_ts.mean(dim=(0, 1), keepdim=True)
+    train_features_std = train_features_ts.std(dim=(0, 1), keepdim=True)
+    train_features_ts = (train_features_ts - train_features_mean) / (
+        train_features_std + 1e-8
+    )  # Add small value to avoid division by zero
+
+    val_features = run_pipeline_extract_features(
+        pipeline, val_all_pred_noises_and_noises, included_features
+    )
+    val_features_ts = torch.stack(val_features)
+    val_features_ts = (val_features_ts - train_features_mean) / (
+        train_features_std + 1e-8
+    )  # Add small value to avoid division by zero
+    val_labels_ts = torch.concat(val_all_labels)
+
+    if test_all_pred_noises_and_noises is not None and test_all_labels is not None:
+        test_features = run_pipeline_extract_features(
+            pipeline, test_all_pred_noises_and_noises, included_features
+        )
+        test_features_ts = torch.stack(test_features)
+        test_features_ts = (test_features_ts - train_features_mean) / (
+            train_features_std + 1e-8
+        )  # Add small value to avoid division by zero
+        test_labels_ts = torch.concat(test_all_labels)
+    else:
+        test_features_ts = val_features_ts
+        test_labels_ts = val_labels_ts
+
+    logger.info(
+        f"Extracted features: train={train_features_ts.shape}, val={val_features_ts.shape}, test={test_features_ts.shape if test_all_pred_noises_and_noises else 'N/A'}"
+    )
+    logger.info(
+        f"Train labels: {train_labels_ts.shape}, Val labels: {val_labels_ts.shape}, Test labels: {test_labels_ts.shape if test_all_pred_noises_and_noises else 'N/A'}"
+    )
+    logger.info(
+        f"Train features mean: {train_features_ts.mean().item()}, std: {train_features_ts.std().item()}"
+    )  # Debugging information for feature normalization
+    logger.info(
+        f"Val features mean: {val_features_ts.mean().item()}, std: {val_features_ts.std().item()}"
+    )  # Debugging information for feature normalization
+    logger.info(
+        f"Test features mean: {test_features_ts.mean().item()}, std: {test_features_ts.std().item()}"
+    )  # Debugging information for feature normalization
+
+    # Initialize classifier
+    classifier = get_classifier(
+        classifier_type=config["classifier_type"],
+        input_size=train_features_ts.shape[-1],
+        hidden_size=config["hidden_size"],
+        num_layers=config["num_layers"],
+        num_classes=config["num_classes"],
+    )
+    classifier.to(config["device"])
+
+    logger.info(f"Initialized classifier: {classifier}")
+
+    # Train classifier
+    trained_classifier, best_model_state_dict = train_classifier(
+        classifier,
+        train_features_ts,
+        train_labels_ts,
+        val_features_ts,
+        val_labels_ts,
+        config["batch_size"],
+        config["epochs"],
+        config["lr"],
+        config["weight_decay"],
+        config["device"],
+    )
+
+    # Save the trained model
+    model_save_path = f"{config['output']}/model_{config['experiment_name']}.pt"
+    torch.save(best_model_state_dict, model_save_path)
+
+    # Load the best model state
+    # best_classifier = get_classifier(
+    #     classifier_type=config.get("classifier_type", "lstm"),
+    #     input_size=train_features_ts.shape[-1],
+    #     hidden_size=config.get("hidden_size", 64),
+    #     num_layers=config.get("num_layers", 1),
+    #     num_classes=config.get("num_classes", 2)
+    # )
+    trained_classifier.load_state_dict(best_model_state_dict)
+
+    # Evaluate classifier
+    eval_report = evaluate_classifier(
+        trained_classifier,
+        test_features_ts,
+        test_labels_ts,
+        config["batch_size"],
+        config["device"],
+    )
+
+    eval_report["experiment_name"] = config["experiment_name"]
+
+    logger.info(f"Evaluation report: {eval_report}")
+
+    # Save evaluation report
+    eval_report_path = (
+        f"{config['output']}/eval_report_{config['experiment_name']}.json"
+    )
+    with open(eval_report_path, "w") as f:
+        json.dump(eval_report, f)
+    logger.info(
+        f"Experiment '{config['experiment_name']}' completed. Evaluation report saved to {eval_report_path}"
+    )
+
+    return eval_report
+
+
+def run_experiments(config):
+    """Runs multiple experiments with the given configuration.
+    Args:
+        config (dict): A configuration dictionary containing all necessary parameters.
+    """
+    base_config = config["base"]
+    experiment_configs = config["experiments"] or [{}]
+    logger.info(f"Running {len(experiment_configs)} experiments...")
+
+    os.makedirs(base_config["output"], exist_ok=True)
+
+    if need_denoise := bool(
+        set(experiment_configs[0].keys()).intersection(
+            CONFIG_ATTRIBUTES_REQUIRE_DENOISE
+        )
+    ):
+        logger.info("Denoising is required for each experiment.")
+
+    train_dataloader = prepare_dataloader(f"{base_config['folder']}/train")
+    test_dataloader = prepare_dataloader(f"{base_config['folder']}/val")
+
+    reports = []
+
+    if need_denoise:
+        for exp_config in experiment_configs:
+            # Merge base config with experiment-specific config
+            merged_config = merge_configs(base_config, exp_config)
+
+            pipeline_and_data = run_denoise(
+                merged_config, train_dataloader, test_dataloader
+            )
+            eval_report = run_extract_features_and_evaluate(
+                merged_config, *pipeline_and_data
+            )
+            reports.append(eval_report)
+
+    else:
+        pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
+
+        for exp_config in experiment_configs:
+            # Merge base config with experiment-specific config
+            merged_config = merge_configs(base_config, exp_config)
+
+            eval_report = run_extract_features_and_evaluate(
+                merged_config, *pipeline_and_data
+            )
+            reports.append(eval_report)
+
+    reports = sorted(reports, key=lambda x: len(x["experiment_name"]))
+    reports_df = pd.DataFrame(reports)
+    reports_df.to_csv(f"{base_config['output']}/eval_reports.csv", index=False)
+
+    logger.info(
+        f"All experiments completed. Evaluation reports saved to {base_config['output']}/eval_reports.csv"
+    )
+    logger.info(f"Evaluation reports:\n{reports_df}")
+
+
+def run_generalisation_experiment(config):
+    """Runs a generalisation experiment with the given configuration.
+    Args:
+        config (dict): A configuration dictionary containing all necessary parameters.
+    """
+    base_config = config["base"]
+    model_dirs = os.listdir(f"{base_config['folder']}/train")
+    os.makedirs(base_config["output"], exist_ok=True)
+
+    logger.info(f"Initial CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
+
+    train_dataloaders = {
+        model_dir: prepare_dataloader(f"{base_config['folder']}/train/{model_dir}")
+        for model_dir in model_dirs
+    }
+    test_dataloaders = {
+        model_dir: prepare_dataloader(f"{base_config['folder']}/val/{model_dir}")
+        for model_dir in model_dirs
+    }
+
+    logger.info(
+        f"Running generalisation experiment with {len(model_dirs)} model directories..."
+    )
+
+    for model_dir, (train_dataloader, test_dataloader) in zip(
+        model_dirs, zip(train_dataloaders.values(), test_dataloaders.values())
+    ):
+        if os.path.exists(
+            f"{base_config['output']}/pipeline_and_data_{model_dir}.pt"
+        ):
+            logger.info(
+                f"Pipeline and data for model directory {model_dir} already exists. Skipping..."
+            )
+            continue
+
+        pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
+        torch.save(
+            pipeline_and_data,
+            f"{base_config['output']}/pipeline_and_data_{model_dir}.pt",
+        )
+        del pipeline_and_data  # Free memory
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
+
+    for this_model_dir in model_dirs:  # pnd is pipeline_and_data
+        for (
+            that_model_dir
+        ) in model_dirs:  # inner loop to iterate over each model directory
+            (
+                this_pipeline,
+                this_train_all_pred_noises_and_noises,
+                this_train_all_labels,
+                this_val_all_pred_noises_and_noises,
+                this_val_all_labels,
+            ) = torch.load(
+                f"{base_config['output']}/pipeline_and_data_{this_model_dir}.pt",
+                weights_only=False
+            )
+            _, _, _, that_val_all_pred_noises_and_noises, that_val_all_labels = (
+                torch.load(
+                    f"{base_config['output']}/pipeline_and_data_{that_model_dir}.pt",
+                    weights_only=False
+                )
+            )
+
+            base_config["experiment_name"] = (
+                f"generalisation_{this_model_dir}_to_{that_model_dir}"
+            )
+
+            logger.info(
+                f"Running generalisation experiment from {this_model_dir} to {that_model_dir}..."
+            )
+
+            # Train classifier on this model's training data and evaluate on that model's validation data
+            run_extract_features_and_evaluate(
+                base_config,
+                this_pipeline,
+                this_train_all_pred_noises_and_noises,
+                this_train_all_labels,
+                this_val_all_pred_noises_and_noises,
+                this_val_all_labels,
+                that_val_all_pred_noises_and_noises,
+                that_val_all_labels,
+            )
+
+            del (
+                this_pipeline,
+                this_train_all_pred_noises_and_noises,
+                this_train_all_labels,
+                this_val_all_pred_noises_and_noises,
+                this_val_all_labels,
+            )
+            del that_val_all_pred_noises_and_noises, that_val_all_labels
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
+
+
+def convert_diffusion_percent_to_float(diffusion_percent: float | str) -> float:
+    if isinstance(diffusion_percent, float) or isinstance(diffusion_percent, int):
+        return float(diffusion_percent)
+
+    match = regex.match(r"^(\d+)\/(\d+)$", diffusion_percent)
+    if not match:
+        raise ValueError(f"Invalid diffusion_percent format: {diffusion_percent}")
+    numerator, denominator = map(int, match.groups())
+    return numerator / denominator
+
+
+def normalise_config(config):
+    """Normalises the configuration dictionary.
+    Args:
+        config (dict): The configuration dictionary to normalise.
+    Returns:
+        dict: The normalised configuration dictionary.
+    """
+    if "diffusion_percent" in config["base"]:
+        config["base"]["diffusion_percent"] = convert_diffusion_percent_to_float(
+            config["base"]["diffusion_percent"]
+        )
+
+    if "folder" in config["base"]:
+        config["base"]["folder"] = get_folder(datadirs, config["base"]["folder"])
+
+    if IS_ON_GOOGLE_COLAB and "output" in config["base"]:
+        config["base"]["output"] = (
+            f"/content/drive/MyDrive/mypipeline_exps_3/{config['base']['output']}"
+        )
+
+    if not torch.cuda.is_available():
+        config["base"]["device"] = "cpu"
+
+    return config
+
+
+try:
+    from google.colab import drive  # type:ignore
+
+    drive.mount("/content/drive")
+    IS_ON_GOOGLE_COLAB = True
+except ImportError:
+    IS_ON_GOOGLE_COLAB = False
 
 if __name__ == "__main__":
-    main()
+    datadirs = download_and_prepare_data(num_train_samples=100, num_test_samples=50)
+
+    if IS_ON_GOOGLE_COLAB:
+        prefix = "/content/drive/MyDrive/mypipeline_exps_confs/"
+    else:
+        prefix = ""
+
+    with open(f"{prefix}default.yaml", "r") as f:
+        default_config = yaml.safe_load(f)
+        default_config = normalise_config(default_config)
+
+    default_config.update({"experiments": [{}]})
+
+    with open(f"{prefix}exps/generalisation/generalisation_exp.yaml", "r") as f:
+        generalisation_config = yaml.safe_load(f)
+        generalisation_config = normalise_config(generalisation_config)
+        generalisation_config = merge_configs(default_config, generalisation_config)
+
+    other_configs = []
+    for exp_file in os.listdir(f"{prefix}exps/others"):
+        with open(f"{prefix}exps/others/{exp_file}", "r") as f:
+            exp_config = yaml.safe_load(f)
+            exp_config = normalise_config(exp_config)
+            other_configs.append(merge_configs(default_config, exp_config))
+
+    logger.info(
+        f"Loaded 1 generalisation experiment configuration and {len(other_configs)} other experiment configurations."
+    )
+
+    for config in other_configs:
+        logger.info(f"Running experiment with config: {config['base']['output']}")
+        run_experiments(config)
+
+    logger.info("Running generalisation experiment...")
+    run_generalisation_experiment(generalisation_config)
