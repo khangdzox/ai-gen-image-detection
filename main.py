@@ -114,13 +114,13 @@ def main():
     dmid_metrics = run_evaluation_metrics(dmid_labels, dmid_scores)
     print("DMimageDetection Metrics:")
     pprint.pprint(dmid_metrics)
-    pd.DataFrame(dmid_metrics).to_csv('output/dmid/dmid_metrics.csv', index=False)
+    pd.DataFrame(dmid_metrics, index=[0]).to_csv('output/dmid/dmid_metrics.csv', index=False)
 
     ganid_scores = df_dmid[dmid_models[1]].to_numpy()
     ganid_metrics = run_evaluation_metrics(dmid_labels, ganid_scores)
     print("GANimageDetection Metrics:")
     pprint.pprint(ganid_metrics)
-    pd.DataFrame(ganid_metrics).to_csv('output/dmid/ganid_metrics.csv', index=False)
+    pd.DataFrame(ganid_metrics, index=[0]).to_csv('output/dmid/ganid_metrics.csv', index=False)
 
     # ------------------- #
     # UniversalFaceDetect #
@@ -159,10 +159,11 @@ def main():
     # --------- #
     # AEROBLADE #
     # --------- #
+    import torchvision.transforms.v2 as tf
 
     distances = compute_distances(
         dirs=[Path('data/0_real'), Path('data/1_fake')],
-        transforms=['clean'],
+        transforms=[tf.Compose([tf.Resize(512), tf.CenterCrop(512)])],
         repo_ids=[
             "CompVis/stable-diffusion-v1-1",
             "stabilityai/stable-diffusion-2-base",

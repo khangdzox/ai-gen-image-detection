@@ -5,12 +5,17 @@ description = "AI-generated image detection"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "accelerate>=1.8.1",
+    "diffusers>=0.33.1",
     "ftfy>=6.3.1",
+    "hf-xet>=1.1.4",
     "kagglehub>=0.3.12",
+    "matplotlib>=3.10.3",
     "mpi4py>=4.0.3",
     "numpy>=2.3.0",
     "pandas>=2.3.0",
     "scikit-learn>=1.7.0",
+    "scipy>=1.15.3",
     "torch==2.6.0",
     "torchvision>=0.21.0",
     "transformers>=4.52.4",
@@ -36,6 +41,7 @@ explicit = true
 dev = [
     "ipykernel>=6.29.5",
     "pip>=25.0.1",
+    "ruff>=0.12.3",
 ]
 
 [tool.uv]
