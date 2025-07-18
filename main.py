@@ -668,81 +668,71 @@ def train_classifier(
     best_model_state_dict = None
     best_eval_loss = float("inf")
 
-    with mlflow.start_run(run_name=config["experiment_name"]):
-        mlflow.log_params(
-            {
-                "batch_size": batch_size,
-                "epochs": epochs,
-                "learning_rate": lr,
-                "weight_decay": weight_decay,
-            }
-        )
+    for epoch in range(epochs):
+        classifier.train()
 
-        for epoch in range(epochs):
-            classifier.train()
+        running_loss = 0
+        correct = 0
+        total = 0
+        is_best = False
 
-            running_loss = 0
-            correct = 0
-            total = 0
-            is_best = False
+        for i in range(0, X_train.shape[0], batch_size):
+            batch = X_train[i : i + batch_size].to(device).to(torch.float32)
+            labels = y_train[i : i + batch_size].to(device)
 
-            for i in range(0, X_train.shape[0], batch_size):
-                batch = X_train[i : i + batch_size].to(device).to(torch.float32)
-                labels = y_train[i : i + batch_size].to(device)
+            logits = classifier(batch)
+            loss = criterion(logits, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * batch.size(0)
+
+            preds = logits.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+        with torch.no_grad():
+            classifier.eval()
+
+            val_running_loss = 0
+            val_correct = 0
+            val_total = 0
+
+            for i in tqdm(range(0, X_val.shape[0], batch_size), leave=False):
+                batch = X_val[i : i + batch_size].to(device).to(torch.float32)
+                labels = y_val[i : i + batch_size].to(device)
 
                 logits = classifier(batch)
-                loss = criterion(logits, labels)
+                val_loss = criterion(logits, labels)
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                running_loss += loss.item() * batch.size(0)
+                val_running_loss += val_loss.item() * batch.size(0)
 
                 preds = logits.argmax(dim=1)
-                correct += (preds == labels).sum().item()
-                total += labels.size(0)
+                val_correct += (preds == labels).sum().item()
+                val_total += labels.size(0)
 
-            with torch.no_grad():
-                classifier.eval()
+        scheduler.step(val_running_loss / val_total)
 
-                val_running_loss = 0
-                val_correct = 0
-                val_total = 0
+        if val_running_loss / val_total < best_eval_loss:
+            best_eval_loss = val_running_loss / val_total
+            best_model_state_dict = copy.deepcopy(classifier.state_dict().copy())
+            is_best = True
 
-                for i in tqdm(range(0, X_val.shape[0], batch_size), leave=False):
-                    batch = X_val[i : i + batch_size].to(device).to(torch.float32)
-                    labels = y_val[i : i + batch_size].to(device)
+        logger.info(
+            f"Epoch {epoch + 1:>2}: Loss = {running_loss / total:.6f}, Accuracy = {correct / total:.6f}, Val Loss = {val_running_loss / val_total:.6f}, Val Accuracy = {val_correct / val_total:.6f}, LR = {scheduler.get_last_lr()[0]:e}{', New best' if is_best else ''}"
+        )
 
-                    logits = classifier(batch)
-                    val_loss = criterion(logits, labels)
-
-                    val_running_loss += val_loss.item() * batch.size(0)
-
-                    preds = logits.argmax(dim=1)
-                    val_correct += (preds == labels).sum().item()
-                    val_total += labels.size(0)
-
-            scheduler.step(val_running_loss / val_total)
-
-            if val_running_loss / val_total < best_eval_loss:
-                best_eval_loss = val_running_loss / val_total
-                best_model_state_dict = copy.deepcopy(classifier.state_dict().copy())
-                is_best = True
-
-            logger.info(
-                f"Epoch {epoch + 1:>2}: Loss = {running_loss / total:.6f}, Accuracy = {correct / total:.6f}, Val Loss = {val_running_loss / val_total:.6f}, Val Accuracy = {val_correct / val_total:.6f}, LR = {scheduler.get_last_lr()[0]:e}{', New best' if is_best else ''}"
-            )
-
-            mlflow.log_metrics(
-                {
-                    "train_loss": running_loss / total,
-                    "train_accuracy": correct / total,
-                    "val_loss": val_running_loss / val_total,
-                    "val_accuracy": val_correct / val_total,
-                },
-                step=epoch + 1,
-            )
+        mlflow.log_metrics(
+            {
+                "train_loss": running_loss / total,
+                "train_accuracy": correct / total,
+                "val_loss": val_running_loss / val_total,
+                "val_accuracy": val_correct / val_total,
+            },
+            step=epoch + 1,
+        )
 
     assert best_model_state_dict is not None, (
         "Training failed, either epochs == 0 or data is empty. No model was trained."
@@ -1042,53 +1032,75 @@ def run_extract_features_and_evaluate(
 
     logger.info(f"Initialized classifier: {classifier}")
 
-    # Train classifier
-    trained_classifier, best_model_state_dict = train_classifier(
-        classifier,
-        train_features_ts,
-        train_labels_ts,
-        val_features_ts,
-        val_labels_ts,
-        config["batch_size"],
-        config["epochs"],
-        config["lr"],
-        config["weight_decay"],
-        config["device"],
-    )
 
-    # Save the trained model
-    model_save_path = f"{config['output']}/model_{config['experiment_name']}.pt"
-    torch.save(best_model_state_dict, model_save_path)
+    with mlflow.start_run(run_name=config["experiment_name"]):
+        mlflow.log_params(
+            {
+                "included_features": config["included_features"],
+                "timesteps": config["timesteps"],
+                "diffusion_percent": config["diffusion_percent"],
+                "hidden_size": config["hidden_size"],
+                "num_layers": config["num_layers"],
+                "batch_size": config["batch_size"],
+                "epochs": config["epochs"],
+                "learning_rate": config["lr"],
+                "weight_decay": config["weight_decay"],
+            }
+        )
 
-    # Load the best model state
-    # best_classifier = get_classifier(
-    #     classifier_type=config.get("classifier_type", "lstm"),
-    #     input_size=train_features_ts.shape[-1],
-    #     hidden_size=config.get("hidden_size", 64),
-    #     num_layers=config.get("num_layers", 1),
-    #     num_classes=config.get("num_classes", 2)
-    # )
-    trained_classifier.load_state_dict(best_model_state_dict)
+        # Train classifier
+        trained_classifier, best_model_state_dict = train_classifier(
+            classifier,
+            train_features_ts,
+            train_labels_ts,
+            val_features_ts,
+            val_labels_ts,
+            config["batch_size"],
+            config["epochs"],
+            config["lr"],
+            config["weight_decay"],
+            config["device"],
+        )
 
-    # Evaluate classifier
-    eval_report = evaluate_classifier(
-        trained_classifier,
-        test_features_ts,
-        test_labels_ts,
-        config["batch_size"],
-        config["device"],
-    )
+        # Save the trained model
+        model_save_path = f"{config['output']}/model_{config['experiment_name']}.pt"
+        torch.save(best_model_state_dict, model_save_path)
 
-    eval_report["experiment_name"] = config["experiment_name"]
+        mlflow.log_artifact(model_save_path, artifact_path="models")
 
-    logger.info(f"Evaluation report: {eval_report}")
+        # Load the best model state
+        # best_classifier = get_classifier(
+        #     classifier_type=config.get("classifier_type", "lstm"),
+        #     input_size=train_features_ts.shape[-1],
+        #     hidden_size=config.get("hidden_size", 64),
+        #     num_layers=config.get("num_layers", 1),
+        #     num_classes=config.get("num_classes", 2)
+        # )
+        trained_classifier.load_state_dict(best_model_state_dict)
 
-    # Save evaluation report
-    eval_report_path = (
-        f"{config['output']}/eval_report_{config['experiment_name']}.json"
-    )
-    with open(eval_report_path, "w") as f:
-        json.dump(eval_report, f)
+        # Evaluate classifier
+        eval_report = evaluate_classifier(
+            trained_classifier,
+            test_features_ts,
+            test_labels_ts,
+            config["batch_size"],
+            config["device"],
+        )
+
+        eval_report["experiment_name"] = config["experiment_name"]
+
+        logger.info(f"Evaluation report: {eval_report}")
+
+        # Save evaluation report
+        eval_report_path = (
+            f"{config['output']}/eval_report_{config['experiment_name']}.json"
+        )
+
+        with open(eval_report_path, "w") as f:
+            json.dump(eval_report, f)
+
+        mlflow.log_artifact(eval_report_path, artifact_path="eval_reports")
+
     logger.info(
         f"Experiment '{config['experiment_name']}' completed. Evaluation report saved to {eval_report_path}"
     )
@@ -1158,7 +1170,7 @@ def run_experiments(config):
 
     with mlflow.start_run("reporting"):
         mlflow.log_params(base_config)
-        mlflow.log_artifacts(base_config["output"])
+        mlflow.log_artifact(f"{base_config['output']}/eval_reports.csv", artifact_path="eval_reports")
 
     logger.info(
         f"All experiments completed. Evaluation reports saved to {base_config['output']}/eval_reports.csv"
@@ -1285,7 +1297,9 @@ def run_generalisation_experiment(config):
 
     with mlflow.start_run("reporting"):
         mlflow.log_params(base_config)
-        mlflow.log_artifacts(base_config["output"])
+        mlflow.log_artifact(
+            f"{base_config['output']}/eval_reports.csv", artifact_path="eval_reports"
+        )
 
     logger.info(
         f"Generalisation experiments completed. Evaluation reports saved to {base_config['output']}/eval_reports.csv"
