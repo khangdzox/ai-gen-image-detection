@@ -1,0 +1,26 @@
+base:
+  folder: data
+  output: full_dataset_exp
+  seed: 42
+  hf_repo: CompVis/stable-diffusion-v1-4
+  timesteps: 30
+  diffusion_percent: 2/3
+  device: cuda
+
+  classifier_type: lstm
+  hidden_size: 64
+  num_layers: 3
+  num_classes: 2
+
+  batch_size: 8
+  epochs: 50
+  lr: 1.e-3
+  weight_decay: 1.e-5
+
+  experiment_name: full_dataset
+  included_features:
+    - noise_stats
+    - noise_fft
+    - cos_sim
+
+experiments:
