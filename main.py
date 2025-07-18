@@ -7,6 +7,7 @@ import random
 
 import kagglehub
 import matplotlib.pyplot as plt
+import mlflow
 import numpy as np
 import pandas as pd
 import regex
@@ -50,6 +51,8 @@ stdout = logging.StreamHandler()
 logger.addHandler(stdout)
 
 logger.info("################# Starting mypipeline... #################")
+
+mlflow.set_tracking_uri("http://103.21.1.103:10000")
 
 
 def plot_embedding(X_embedded, labels, title="Embedding"):
@@ -665,61 +668,81 @@ def train_classifier(
     best_model_state_dict = None
     best_eval_loss = float("inf")
 
-    for epoch in range(epochs):
-        classifier.train()
+    with mlflow.start_run(run_name=config["experiment_name"]):
+        mlflow.log_params(
+            {
+                "batch_size": batch_size,
+                "epochs": epochs,
+                "learning_rate": lr,
+                "weight_decay": weight_decay,
+            }
+        )
 
-        running_loss = 0
-        correct = 0
-        total = 0
-        is_best = False
+        for epoch in range(epochs):
+            classifier.train()
 
-        for i in range(0, X_train.shape[0], batch_size):
-            batch = X_train[i : i + batch_size].to(device).to(torch.float32)
-            labels = y_train[i : i + batch_size].to(device)
+            running_loss = 0
+            correct = 0
+            total = 0
+            is_best = False
 
-            logits = classifier(batch)
-            loss = criterion(logits, labels)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            running_loss += loss.item() * batch.size(0)
-
-            preds = logits.argmax(dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-
-        with torch.no_grad():
-            classifier.eval()
-
-            val_running_loss = 0
-            val_correct = 0
-            val_total = 0
-
-            for i in tqdm(range(0, X_val.shape[0], batch_size), leave=False):
-                batch = X_val[i : i + batch_size].to(device).to(torch.float32)
-                labels = y_val[i : i + batch_size].to(device)
+            for i in range(0, X_train.shape[0], batch_size):
+                batch = X_train[i : i + batch_size].to(device).to(torch.float32)
+                labels = y_train[i : i + batch_size].to(device)
 
                 logits = classifier(batch)
-                val_loss = criterion(logits, labels)
+                loss = criterion(logits, labels)
 
-                val_running_loss += val_loss.item() * batch.size(0)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                running_loss += loss.item() * batch.size(0)
 
                 preds = logits.argmax(dim=1)
-                val_correct += (preds == labels).sum().item()
-                val_total += labels.size(0)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
 
-        scheduler.step(val_running_loss / val_total)
+            with torch.no_grad():
+                classifier.eval()
 
-        if val_running_loss / val_total < best_eval_loss:
-            best_eval_loss = val_running_loss / val_total
-            best_model_state_dict = copy.deepcopy(classifier.state_dict().copy())
-            is_best = True
+                val_running_loss = 0
+                val_correct = 0
+                val_total = 0
 
-        logger.info(
-            f"Epoch {epoch + 1:>2}: Loss = {running_loss / total:.6f}, Accuracy = {correct / total:.6f}, Val Loss = {val_running_loss / val_total:.6f}, Val Accuracy = {val_correct / val_total:.6f}, LR = {scheduler.get_last_lr()[0]:e}{', New best' if is_best else ''}"
-        )
+                for i in tqdm(range(0, X_val.shape[0], batch_size), leave=False):
+                    batch = X_val[i : i + batch_size].to(device).to(torch.float32)
+                    labels = y_val[i : i + batch_size].to(device)
+
+                    logits = classifier(batch)
+                    val_loss = criterion(logits, labels)
+
+                    val_running_loss += val_loss.item() * batch.size(0)
+
+                    preds = logits.argmax(dim=1)
+                    val_correct += (preds == labels).sum().item()
+                    val_total += labels.size(0)
+
+            scheduler.step(val_running_loss / val_total)
+
+            if val_running_loss / val_total < best_eval_loss:
+                best_eval_loss = val_running_loss / val_total
+                best_model_state_dict = copy.deepcopy(classifier.state_dict().copy())
+                is_best = True
+
+            logger.info(
+                f"Epoch {epoch + 1:>2}: Loss = {running_loss / total:.6f}, Accuracy = {correct / total:.6f}, Val Loss = {val_running_loss / val_total:.6f}, Val Accuracy = {val_correct / val_total:.6f}, LR = {scheduler.get_last_lr()[0]:e}{', New best' if is_best else ''}"
+            )
+
+            mlflow.log_metrics(
+                {
+                    "train_loss": running_loss / total,
+                    "train_accuracy": correct / total,
+                    "val_loss": val_running_loss / val_total,
+                    "val_accuracy": val_correct / val_total,
+                },
+                step=epoch + 1,
+            )
 
     assert best_model_state_dict is not None, (
         "Training failed, either epochs == 0 or data is empty. No model was trained."
@@ -799,8 +822,8 @@ def accuracy_report(y_true, y_pred, y_pred_probs=None):
         **accuracy_per_class,
         "accuracy": total_accuracy,
         "f1": weighted_f1_score,
-        "auc": auc,
-        "map": average_precision,
+        "auc": float(auc) if auc is not None else None,
+        "map": float(average_precision) if average_precision is not None else None,
     }
 
 
@@ -1082,6 +1105,14 @@ def run_experiments(config):
     experiment_configs = config["experiments"] or [{}]
     logger.info(f"Running {len(experiment_configs)} experiments...")
 
+    exp_id = mlflow.create_experiment(
+        name=base_config["output"],
+        tags={"type": "generic",
+              "mlflow.note.content": f"Running {len(experiment_configs)} experiments with base config: {base_config}"
+              }
+    )
+    mlflow.set_experiment(experiment_id=exp_id)
+
     os.makedirs(base_config["output"], exist_ok=True)
 
     if need_denoise := bool(
@@ -1125,6 +1156,10 @@ def run_experiments(config):
     reports_df = pd.DataFrame(reports)
     reports_df.to_csv(f"{base_config['output']}/eval_reports.csv", index=False)
 
+    with mlflow.start_run("reporting"):
+        mlflow.log_params(base_config)
+        mlflow.log_artifacts(base_config["output"])
+
     logger.info(
         f"All experiments completed. Evaluation reports saved to {base_config['output']}/eval_reports.csv"
     )
@@ -1139,6 +1174,14 @@ def run_generalisation_experiment(config):
     base_config = config["base"]
     model_dirs = os.listdir(f"{base_config['folder']}/train")
     os.makedirs(base_config["output"], exist_ok=True)
+
+    exp_id = mlflow.create_experiment(
+        name=base_config["output"],
+        tags={"type": "generalisation",
+              "mlflow.note.content": f"Running generalisation experiment with {len(model_dirs)} model directories."
+              }
+    )
+    mlflow.set_experiment(experiment_id=exp_id)
 
     logger.info(f"Initial CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
 
@@ -1159,7 +1202,7 @@ def run_generalisation_experiment(config):
         model_dirs, zip(train_dataloaders.values(), test_dataloaders.values())
     ):
         if os.path.exists(
-            f"{base_config['output']}/pipeline_and_data_{model_dir}.pt"
+            f"{base_config['output']}_denoised_data/pipeline_and_data_{model_dir}.pt"
         ):
             logger.info(
                 f"Pipeline and data for model directory {model_dir} already exists. Skipping..."
@@ -1169,12 +1212,15 @@ def run_generalisation_experiment(config):
         pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
         torch.save(
             pipeline_and_data,
-            f"{base_config['output']}/pipeline_and_data_{model_dir}.pt",
+            f"{base_config['output']}_denoised_data/pipeline_and_data_{model_dir}.pt",
         )
         del pipeline_and_data  # Free memory
         gc.collect()
         torch.cuda.empty_cache()
         logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
+
+    reports = []
+    logger.info("Starting generalisation experiments...")
 
     for this_model_dir in model_dirs:  # pnd is pipeline_and_data
         for (
@@ -1187,12 +1233,12 @@ def run_generalisation_experiment(config):
                 this_val_all_pred_noises_and_noises,
                 this_val_all_labels,
             ) = torch.load(
-                f"{base_config['output']}/pipeline_and_data_{this_model_dir}.pt",
+                f"{base_config['output']}_denoised_data/pipeline_and_data_{this_model_dir}.pt",
                 weights_only=False
             )
             _, _, _, that_val_all_pred_noises_and_noises, that_val_all_labels = (
                 torch.load(
-                    f"{base_config['output']}/pipeline_and_data_{that_model_dir}.pt",
+                    f"{base_config['output']}_denoised_data/pipeline_and_data_{that_model_dir}.pt",
                     weights_only=False
                 )
             )
@@ -1206,7 +1252,7 @@ def run_generalisation_experiment(config):
             )
 
             # Train classifier on this model's training data and evaluate on that model's validation data
-            run_extract_features_and_evaluate(
+            eval_report = run_extract_features_and_evaluate(
                 base_config,
                 this_pipeline,
                 this_train_all_pred_noises_and_noises,
@@ -1216,6 +1262,11 @@ def run_generalisation_experiment(config):
                 that_val_all_pred_noises_and_noises,
                 that_val_all_labels,
             )
+
+            eval_report["original_model"] = this_model_dir
+            eval_report["target_model"] = that_model_dir
+
+            reports.append(eval_report)
 
             del (
                 this_pipeline,
@@ -1228,6 +1279,17 @@ def run_generalisation_experiment(config):
             gc.collect()
             torch.cuda.empty_cache()
             logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
+
+    reports_df = pd.DataFrame(reports)
+    reports_df.to_csv(f"{base_config['output']}/eval_reports.csv", index=False)
+
+    with mlflow.start_run("reporting"):
+        mlflow.log_params(base_config)
+        mlflow.log_artifacts(base_config["output"])
+
+    logger.info(
+        f"Generalisation experiments completed. Evaluation reports saved to {base_config['output']}/eval_reports.csv"
+    )
 
 
 def convert_diffusion_percent_to_float(diffusion_percent: float | str) -> float:
@@ -1271,17 +1333,14 @@ try:
     from google.colab import drive  # type:ignore
 
     drive.mount("/content/drive")
+    prefix = "/content/drive/MyDrive/mypipeline_exps_confs/"
     IS_ON_GOOGLE_COLAB = True
 except ImportError:
     IS_ON_GOOGLE_COLAB = False
+    prefix = ""
 
 if __name__ == "__main__":
     datadirs = download_and_prepare_data(num_train_samples=100, num_test_samples=50)
-
-    if IS_ON_GOOGLE_COLAB:
-        prefix = "/content/drive/MyDrive/mypipeline_exps_confs/"
-    else:
-        prefix = ""
 
     with open(f"{prefix}default.yaml", "r") as f:
         default_config = yaml.safe_load(f)
@@ -1311,3 +1370,8 @@ if __name__ == "__main__":
 
     logger.info("Running generalisation experiment...")
     run_generalisation_experiment(generalisation_config)
+
+    mlflow.create_experiment("logs", tags={"type": "logs"})
+    mlflow.set_experiment("logs")
+    with mlflow.start_run("logs"):
+        mlflow.log_artifact("mypipeline.log")

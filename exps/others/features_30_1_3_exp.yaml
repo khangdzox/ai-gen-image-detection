@@ -1,5 +1,5 @@
 base:
-  folder: data_aio_x
+  folder: data_aio
   output: features_30_1_3_exp
   seed: 42
   hf_repo: CompVis/stable-diffusion-v1-4
@@ -9,7 +9,7 @@ base:
 
   classifier_type: lstm
   hidden_size: 64
-  num_layers: 1
+  num_layers: 3
   num_classes: 2
 
   batch_size: 8

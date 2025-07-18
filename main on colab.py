@@ -7,7 +7,6 @@ import random
 import kagglehub
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import regex
 import scipy
 import torch
@@ -16,12 +15,7 @@ import yaml
 from diffusers import DDIMScheduler, StableDiffusionPipeline  # type: ignore
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-from sklearn.metrics import (
-    accuracy_score,
-    average_precision_score,
-    f1_score,
-    roc_auc_score,
-)
+from sklearn.metrics import classification_report
 from torchvision import transforms
 from tqdm.auto import tqdm
 
@@ -105,7 +99,9 @@ def compute_energy(x_fft):
 
 
 def extract_noise_features(
-    pred_noise: torch.Tensor, noise: torch.Tensor | None, included_features: list[str]
+    pred_noise: torch.Tensor,
+    noise: torch.Tensor | None,
+    included_features=["noise_stats", "noise_fft", "residual_stats", "cos_sim"],
 ) -> list[torch.Tensor]:
     """
     Extracts features from the predicted noise and optionally from the actual noise.
@@ -442,7 +438,7 @@ def download_and_prepare_data(num_train_samples=400, num_test_samples=100):
                         pass
 
     # Create a smaller dataset with a specified number of samples
-    num_samples = (num_train_samples + num_test_samples) * len(os.listdir(datapath))
+    num_samples = num_train_samples + num_test_samples
 
     logger.info(f"Creating a smaller dataset with {num_samples} samples...")
 
@@ -657,7 +653,7 @@ def train_classifier(
         classifier.parameters(), lr=lr, weight_decay=weight_decay
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-5, cooldown=3
+        optimizer, mode="min", factor=0.1, patience=3
     )
     criterion = torch.nn.CrossEntropyLoss()
 
@@ -717,7 +713,7 @@ def train_classifier(
             is_best = True
 
         logger.info(
-            f"Epoch {epoch + 1:>2}: Loss = {running_loss / total:.6f}, Accuracy = {correct / total:.6f}, Val Loss = {val_running_loss / val_total:.6f}, Val Accuracy = {val_correct / val_total:.6f}, LR = {scheduler.get_last_lr()[0]:e}{', New best' if is_best else ''}"
+            f"Epoch {epoch + 1:02}: Loss = {running_loss / total:.4f}, Accuracy = {correct / total:.4f}, Val Loss = {val_running_loss / val_total:.4f}, Val Accuracy = {val_correct / val_total:.4f}, LR = {scheduler.get_last_lr()[0]:.4f}{', New best' if is_best else ''}"
         )
 
     assert best_model_state_dict is not None, (
@@ -745,7 +741,6 @@ def evaluate_classifier(classifier, X_test, y_test, batch_size=8, device="cuda")
 
     all_preds = []
     all_labels = []
-    all_preds_probs = []
 
     with torch.no_grad():
         for i in range(0, X_test.shape[0], batch_size):
@@ -757,50 +752,8 @@ def evaluate_classifier(classifier, X_test, y_test, batch_size=8, device="cuda")
 
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
-            all_preds_probs.extend(logits.softmax(dim=1)[:, 1].cpu().numpy())
 
-    return accuracy_report(
-        y_true=np.array(all_labels),
-        y_pred=np.array(all_preds),
-        y_pred_probs=np.array(all_preds_probs),
-    )
-
-
-def accuracy_report(y_true, y_pred, y_pred_probs=None):
-    """
-    Generates a report containing accuracy for each class, overall accuracy, and weighted F1 score.
-    Args:
-        y_true (list or np.ndarray): Ground truth labels.
-        y_pred (list or np.ndarray): Predicted labels.
-    Returns:
-        dict: A dictionary containing accuracy for each class, overall accuracy, and weighted F1 score.
-    """
-    unique_classes = np.unique(y_true)
-    accuracy_per_class = {}
-    for cls in unique_classes:
-        cls_indices = np.where(y_true == cls)[0]
-        accuracy_per_class[f"accuracy_{cls}"] = accuracy_score(
-            y_true[cls_indices], y_pred[cls_indices]
-        )
-
-    total_accuracy = accuracy_score(y_true, y_pred)
-
-    weighted_f1_score = f1_score(y_true, y_pred, average="weighted")
-
-    auc = roc_auc_score(y_true, y_pred_probs) if y_pred_probs is not None else None
-    average_precision = (
-        average_precision_score(y_true, y_pred_probs)
-        if y_pred_probs is not None
-        else None
-    )
-
-    return {
-        **accuracy_per_class,
-        "accuracy": total_accuracy,
-        "f1": weighted_f1_score,
-        "auc": auc,
-        "map": average_precision,
-    }
+    return classification_report(all_labels, all_preds, output_dict=True)
 
 
 def visualise_tsne_pca(classifier, X, y, batch_size=32, device="cuda"):
@@ -1055,8 +1008,6 @@ def run_extract_features_and_evaluate(
         config["device"],
     )
 
-    eval_report["experiment_name"] = config["experiment_name"]
-
     logger.info(f"Evaluation report: {eval_report}")
 
     # Save evaluation report
@@ -1068,8 +1019,6 @@ def run_extract_features_and_evaluate(
     logger.info(
         f"Experiment '{config['experiment_name']}' completed. Evaluation report saved to {eval_report_path}"
     )
-
-    return eval_report
 
 
 def run_experiments(config):
@@ -1093,41 +1042,22 @@ def run_experiments(config):
     train_dataloader = prepare_dataloader(f"{base_config['folder']}/train")
     test_dataloader = prepare_dataloader(f"{base_config['folder']}/val")
 
-    reports = []
+    # if need_denoise:
+    #     for exp_config in experiment_configs:
+    #         # Merge base config with experiment-specific config
+    #         merged_config = merge_configs(base_config, exp_config)
 
-    if need_denoise:
-        for exp_config in experiment_configs:
-            # Merge base config with experiment-specific config
-            merged_config = merge_configs(base_config, exp_config)
+    #         pipeline_and_data = run_denoise(merged_config, train_dataloader, test_dataloader)
+    #         run_extract_features_and_evaluate(merged_config, *pipeline_and_data)
 
-            pipeline_and_data = run_denoise(
-                merged_config, train_dataloader, test_dataloader
-            )
-            eval_report = run_extract_features_and_evaluate(
-                merged_config, *pipeline_and_data
-            )
-            reports.append(eval_report)
+    # else:
+    pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
 
-    else:
-        pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
+    for exp_config in experiment_configs:
+        # Merge base config with experiment-specific config
+        merged_config = merge_configs(base_config, exp_config)
 
-        for exp_config in experiment_configs:
-            # Merge base config with experiment-specific config
-            merged_config = merge_configs(base_config, exp_config)
-
-            eval_report = run_extract_features_and_evaluate(
-                merged_config, *pipeline_and_data
-            )
-            reports.append(eval_report)
-
-    reports = sorted(reports, key=lambda x: len(x["experiment_name"]))
-    reports_df = pd.DataFrame(reports)
-    reports_df.to_csv(f"{base_config['output']}/eval_reports.csv", index=False)
-
-    logger.info(
-        f"All experiments completed. Evaluation reports saved to {base_config['output']}/eval_reports.csv"
-    )
-    logger.info(f"Evaluation reports:\n{reports_df}")
+        run_extract_features_and_evaluate(merged_config, *pipeline_and_data)
 
 
 def run_generalisation_experiment(config):
@@ -1137,7 +1067,6 @@ def run_generalisation_experiment(config):
     """
     base_config = config["base"]
     model_dirs = os.listdir(f"{base_config['folder']}/train")
-    os.makedirs(base_config["output"], exist_ok=True)
 
     train_dataloaders = {
         model_dir: prepare_dataloader(f"{base_config['folder']}/train/{model_dir}")
@@ -1152,35 +1081,31 @@ def run_generalisation_experiment(config):
         f"Running generalisation experiment with {len(model_dirs)} model directories..."
     )
 
-    for model_dir, (train_dataloader, test_dataloader) in zip(
-        model_dirs, zip(train_dataloaders.values(), test_dataloaders.values())
-    ):
-        pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
-        torch.save(
-            pipeline_and_data,
-            f"{base_config['output']}/pipeline_and_data_{model_dir}.pt",
+    models_pipeline_and_data = {
+        model_dir: run_denoise(base_config, train_dataloader, test_dataloader)
+        for model_dir, (train_dataloader, test_dataloader) in zip(
+            model_dirs, zip(train_dataloaders.values(), test_dataloaders.values())
         )
-        del pipeline_and_data  # Free memory
-        torch.cuda.empty_cache()
+    }
 
-    for this_model_dir in model_dirs:  # pnd is pipeline_and_data
+    for (
+        this_model_dir,
+        this_pnd,
+    ) in models_pipeline_and_data.items():  # pnd is pipeline_and_data
         for (
-            that_model_dir
-        ) in model_dirs:  # inner loop to iterate over each model directory
+            that_model_dir,
+            that_pnd,
+        ) in (
+            models_pipeline_and_data.items()
+        ):  # inner loop to iterate over each model directory
             (
                 this_pipeline,
                 this_train_all_pred_noises_and_noises,
                 this_train_all_labels,
                 this_val_all_pred_noises_and_noises,
                 this_val_all_labels,
-            ) = torch.load(
-                f"{base_config['output']}/pipeline_and_data_{this_model_dir}.pt"
-            )
-            _, _, _, that_val_all_pred_noises_and_noises, that_val_all_labels = (
-                torch.load(
-                    f"{base_config['output']}/pipeline_and_data_{that_model_dir}.pt"
-                )
-            )
+            ) = this_pnd
+            _, _, _, that_val_all_pred_noises_and_noises, that_val_all_labels = that_pnd
 
             base_config["experiment_name"] = (
                 f"generalisation_{this_model_dir}_to_{that_model_dir}"
@@ -1201,16 +1126,6 @@ def run_generalisation_experiment(config):
                 that_val_all_pred_noises_and_noises,
                 that_val_all_labels,
             )
-
-            del (
-                this_pipeline,
-                this_train_all_pred_noises_and_noises,
-                this_train_all_labels,
-                this_val_all_pred_noises_and_noises,
-                this_val_all_labels,
-            )
-            del that_val_all_pred_noises_and_noises, that_val_all_labels
-            torch.cuda.empty_cache()
 
 
 def convert_diffusion_percent_to_float(diffusion_percent: float | str) -> float:
@@ -1241,7 +1156,7 @@ def normalise_config(config):
 
     if IS_ON_GOOGLE_COLAB and "output" in config["base"]:
         config["base"]["output"] = (
-            f"/content/drive/MyDrive/mypipeline_exps_3/{config['base']['output']}"
+            f"/content/drive/MyDrive/mypipeline_exps_2/{config['base']['output']}"
         )
 
     if not torch.cuda.is_available():
