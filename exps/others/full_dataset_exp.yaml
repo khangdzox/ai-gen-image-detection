@@ -17,10 +17,21 @@ base:
   lr: 1.e-3
   weight_decay: 1.e-5
 
-  experiment_name: full_dataset
-  included_features:
-    - noise_stats
-    - noise_fft
-    - cos_sim
-
 experiments:
+
+  - experiment_name: ns_nfft
+    included_features:
+      - noise_stats
+      - noise_fft
+
+  - experiment_name: ns_rs_cs
+    included_features:
+      - noise_stats
+      - residual_stats
+      - cos_sim
+
+  - experiment_name: ns_nfft_cs
+    included_features:
+      - noise_stats
+      - noise_fft
+      - cos_sim

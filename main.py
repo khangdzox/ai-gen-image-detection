@@ -1354,46 +1354,56 @@ except ImportError:
     prefix = ""
 
 if __name__ == "__main__":
-    datadirs = download_and_prepare_data(num_train_samples=100, num_test_samples=50)
+    try:
+        datadirs = download_and_prepare_data(num_train_samples=100, num_test_samples=50)
 
-    with open(f"{prefix}default.yaml", "r") as f:
-        default_config = yaml.safe_load(f)
-        default_config = normalise_config(default_config)
+        with open(f"{prefix}default.yaml", "r") as f:
+            default_config = yaml.safe_load(f)
+            default_config = normalise_config(default_config)
 
-    default_config.update({"experiments": [{}]})
+        default_config.update({"experiments": [{}]})
 
-    with open(f"{prefix}exps/generalisation/generalisation_exp.yaml", "r") as f:
-        generalisation_config = yaml.safe_load(f)
-        generalisation_config = normalise_config(generalisation_config)
-        generalisation_config = merge_configs(default_config, generalisation_config)
+        with open(f"{prefix}exps/generalisation/generalisation_exp.yaml", "r") as f:
+            generalisation_config = yaml.safe_load(f)
+            generalisation_config = normalise_config(generalisation_config)
+            generalisation_config = merge_configs(default_config, generalisation_config)
 
-    with open(f"{prefix}exps/others/full_dataset_exp.yaml", "r") as f:
-        full_dataset_config = yaml.safe_load(f)
-        full_dataset_config = normalise_config(full_dataset_config)
-        full_dataset_config = merge_configs(default_config, full_dataset_config)
+        with open(f"{prefix}exps/others/full_dataset_exp.yaml", "r") as f:
+            full_dataset_config = yaml.safe_load(f)
+            full_dataset_config = normalise_config(full_dataset_config)
+            full_dataset_config = merge_configs(default_config, full_dataset_config)
 
-    # other_configs = []
-    # for exp_file in os.listdir(f"{prefix}exps/others"):
-    #     with open(f"{prefix}exps/others/{exp_file}", "r") as f:
-    #         exp_config = yaml.safe_load(f)
-    #         exp_config = normalise_config(exp_config)
-    #         other_configs.append(merge_configs(default_config, exp_config))
+        # other_configs = []
+        # for exp_file in os.listdir(f"{prefix}exps/others"):
+        #     with open(f"{prefix}exps/others/{exp_file}", "r") as f:
+        #         exp_config = yaml.safe_load(f)
+        #         exp_config = normalise_config(exp_config)
+        #         other_configs.append(merge_configs(default_config, exp_config))
 
-    # logger.info(
-    #     f"Loaded 1 generalisation experiment configuration and {len(other_configs)} other experiment configurations."
-    # )
+        # logger.info(
+        #     f"Loaded 1 generalisation experiment configuration and {len(other_configs)} other experiment configurations."
+        # )
 
-    # for config in other_configs:
-    #     logger.info(f"Running experiment with config: {config['base']['output']}")
-    #     run_experiments(config)
+        # for config in other_configs:
+        #     logger.info(f"Running experiment with config: {config['base']['output']}")
+        #     run_experiments(config)
 
-    logger.info("Running one full dataset experiment...")
-    run_experiments(full_dataset_config)
+        logger.info("Running one full dataset experiment...")
+        run_experiments(full_dataset_config)
 
-    logger.info("Running generalisation experiment...")
-    run_generalisation_experiment(generalisation_config)
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
 
-    mlflow.create_experiment("logs", tags={"type": "logs"})
-    mlflow.set_experiment("logs")
-    with mlflow.start_run("logs"):
-        mlflow.log_artifact("mypipeline.log")
+        logger.info("Running generalisation experiment...")
+        run_generalisation_experiment(generalisation_config)
+
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        raise e
+
+    finally:
+        mlflow.create_experiment("logs", tags={"type": "logs"})
+        mlflow.set_experiment("logs")
+        with mlflow.start_run("logs"):
+            mlflow.log_artifact("mypipeline.log")
