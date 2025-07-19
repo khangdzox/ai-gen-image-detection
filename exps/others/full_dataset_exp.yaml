@@ -1,5 +1,5 @@
 base:
-  folder: data
+  folder: data_aio
   output: full_dataset_exp
   seed: 42
   hf_repo: CompVis/stable-diffusion-v1-4
