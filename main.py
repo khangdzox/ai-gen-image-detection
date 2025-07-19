@@ -1317,7 +1317,7 @@ def convert_diffusion_percent_to_float(diffusion_percent: float | str) -> float:
     return numerator / denominator
 
 
-def normalise_config(config):
+def normalise_config(config, datadirs):
     """Normalises the configuration dictionary.
     Args:
         config (dict): The configuration dictionary to normalise.
@@ -1359,25 +1359,25 @@ if __name__ == "__main__":
 
         with open(f"{prefix}default.yaml", "r") as f:
             default_config = yaml.safe_load(f)
-            default_config = normalise_config(default_config)
+            default_config = normalise_config(default_config, datadirs)
 
         default_config.update({"experiments": [{}]})
 
         with open(f"{prefix}exps/generalisation/generalisation_exp.yaml", "r") as f:
             generalisation_config = yaml.safe_load(f)
-            generalisation_config = normalise_config(generalisation_config)
+            generalisation_config = normalise_config(generalisation_config, datadirs)
             generalisation_config = merge_configs(default_config, generalisation_config)
 
         with open(f"{prefix}exps/others/full_dataset_exp.yaml", "r") as f:
             full_dataset_config = yaml.safe_load(f)
-            full_dataset_config = normalise_config(full_dataset_config)
+            full_dataset_config = normalise_config(full_dataset_config, datadirs)
             full_dataset_config = merge_configs(default_config, full_dataset_config)
 
         # other_configs = []
         # for exp_file in os.listdir(f"{prefix}exps/others"):
         #     with open(f"{prefix}exps/others/{exp_file}", "r") as f:
         #         exp_config = yaml.safe_load(f)
-        #         exp_config = normalise_config(exp_config)
+        #         exp_config = normalise_config(exp_config, datadirs)
         #         other_configs.append(merge_configs(default_config, exp_config))
 
         # logger.info(
