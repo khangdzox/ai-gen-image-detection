@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime
 import gc
 import json
 import logging
@@ -10,7 +11,6 @@ import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
 import pandas as pd
-import regex
 import scipy
 import torch
 import torchvision
@@ -211,7 +211,7 @@ class MyPipeline:
         text_encoder,
         scheduler,
         total_timesteps=30,
-        diffusion_percent=0.5,
+        diffusion_steps=10,
         device="cuda",
     ):
         """
@@ -224,7 +224,7 @@ class MyPipeline:
             text_encoder (TextEncoder): The text encoder for generating text embeddings from Stable Diffusion Pipeline.
             scheduler (Scheduler): The scheduler for controlling the diffusion process from DDIM.
             total_timesteps (int, optional): The total number of diffusion timesteps. Defaults to 30.
-            diffusion_percent (float, optional): The percentage of timesteps to use for diffusion. Defaults to 0.5.
+            diffusion_steps (float, optional): The number of timesteps to use for diffusion. Defaults to 10.
             device (str, optional): The device to run the pipeline on. Defaults to 'cuda'.
         """
         self.vae = vae.to(device)
@@ -233,7 +233,7 @@ class MyPipeline:
         self.device = device
 
         self.total_timesteps = total_timesteps
-        self.t_start = int(diffusion_percent * total_timesteps)
+        self.t_start = total_timesteps - diffusion_steps
 
         self.scheduler.set_timesteps(self.total_timesteps)
 
@@ -506,20 +506,20 @@ def download_and_prepare_data(num_train_samples=400, num_test_samples=100):
 def prepare_pipeline(
     hf_repo="CompVis/stable-diffusion-v1-4",
     total_timesteps=30,
-    diffusion_percent=0.5,
+    diffusion_steps=10,
     device="cuda",
 ):
     """Prepares the Stable Diffusion pipeline with the specified parameters.
     Args:
         hf_repo (str): The Hugging Face repository to load the Stable Diffusion model from.
         total_timesteps (int): The total number of diffusion timesteps. Defaults to 30.
-        diffusion_percent (float): The percentage of timesteps to use for diffusion. Defaults to 0.5.
+        diffusion_steps (int): The number of timesteps to use for diffusion. Defaults to 10.
         device (str): The device to run the pipeline on. Defaults to 'cuda'.
     Returns:
         MyPipeline: An instance of the MyPipeline class with the prepared models and configurations.
     """
     logger.info(
-        f"Preparing pipeline with repo {hf_repo}, total_timesteps={total_timesteps}, diffusion_percent={diffusion_percent}, device={device}"
+        f"Preparing pipeline with repo {hf_repo}, total_timesteps={total_timesteps}, diffusion_steps={diffusion_steps}, device={device}"
     )
 
     pipeline = StableDiffusionPipeline.from_pretrained(hf_repo)
@@ -536,7 +536,7 @@ def prepare_pipeline(
         text_encoder,
         scheduler,
         total_timesteps,
-        diffusion_percent,
+        diffusion_steps,
         device,
     )
 
@@ -563,12 +563,13 @@ def prepare_dataloader(folder):
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=8,
+        shuffle=False,
     )
 
     return dataloader
 
 
-def run_pipeline_denoise(pipeline, dataloader):
+def run_pipeline_denoise(pipeline, dataloader, output_dir, run_name):
     """Runs the pipeline to denoise images in the DataLoader.
     Args:
         pipeline: The pipeline to use for denoising.
@@ -581,11 +582,29 @@ def run_pipeline_denoise(pipeline, dataloader):
 
     logger.info("Running pipeline to denoise images...")
 
+    dataset_root = dataloader.dataset.root
+    dataset_root = dataset_root.replace("\\", "/").split("/")
+    dataset_root = "_".join(dataset_root[:-1])  # Remove the last part (e.g., 'train' or 'val')
+
     all_pred_noises_and_noises = []
     all_labels = []
 
+    cache = []
+    count_batches = 0
+
+    if os.path.exists(f"{output_dir}/cache/{run_name}_{dataset_root}.pt"):
+        logger.info("Loading cached dataset...")
+        cache = torch.load(f"{output_dir}/cache/{run_name}_{dataset_root}.pt", weights_only=False)
+
     for batch, labels in tqdm(dataloader):
-        pred_noises_list, noises_list = pipeline(batch)
+        if count_batches < len(cache):
+            pred_noises_list, noises_list = cache[count_batches]
+        else:
+            pred_noises_list, noises_list = pipeline(batch)
+            cache.append((pred_noises_list, noises_list))
+            torch.save(cache, f"{output_dir}/cache/{run_name}_{dataset_root}.pt")
+
+        count_batches += 1
         all_pred_noises_and_noises.append((pred_noises_list, noises_list))
         all_labels.append(labels)
 
@@ -936,16 +955,16 @@ def run_denoise(config, train_dataloader, val_dataloader):
     pipeline = prepare_pipeline(
         hf_repo=config["hf_repo"],
         total_timesteps=config["timesteps"],
-        diffusion_percent=config["diffusion_percent"],
+        diffusion_steps=config["diffusion_steps"],
         device=config["device"],
     )
 
     # Load and preprocess data
     train_all_pred_noises_and_noises, train_all_labels = run_pipeline_denoise(
-        pipeline, train_dataloader
+        pipeline, train_dataloader, config["output_dir"], config["run_name"]
     )
     val_all_pred_noises_and_noises, val_all_labels = run_pipeline_denoise(
-        pipeline, val_dataloader
+        pipeline, val_dataloader, config["output_dir"], config["run_name"]
     )
 
     return (
@@ -1032,13 +1051,14 @@ def run_extract_features_and_evaluate(
 
     logger.info(f"Initialized classifier: {classifier}")
 
-
-    with mlflow.start_run(run_name=config["experiment_name"]):
+    with mlflow.start_run(
+        run_name=f"{config['run_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    ):
         mlflow.log_params(
             {
                 "included_features": config["included_features"],
                 "timesteps": config["timesteps"],
-                "diffusion_percent": config["diffusion_percent"],
+                "diffusion_steps": config["diffusion_steps"],
                 "hidden_size": config["hidden_size"],
                 "num_layers": config["num_layers"],
                 "batch_size": config["batch_size"],
@@ -1063,7 +1083,7 @@ def run_extract_features_and_evaluate(
         )
 
         # Save the trained model
-        model_save_path = f"{config['output']}/model_{config['experiment_name']}.pt"
+        model_save_path = f"{config['output_dir']}/model_{config['run_name']}.pt"
         torch.save(best_model_state_dict, model_save_path)
 
         mlflow.log_artifact(model_save_path, artifact_path="models")
@@ -1087,13 +1107,13 @@ def run_extract_features_and_evaluate(
             config["device"],
         )
 
-        eval_report["experiment_name"] = config["experiment_name"]
+        eval_report["run_name"] = config["run_name"]
 
         logger.info(f"Evaluation report: {eval_report}")
 
         # Save evaluation report
         eval_report_path = (
-            f"{config['output']}/eval_report_{config['experiment_name']}.json"
+            f"{config['output_dir']}/eval_report_{config['run_name']}.json"
         )
 
         with open(eval_report_path, "w") as f:
@@ -1102,47 +1122,43 @@ def run_extract_features_and_evaluate(
         mlflow.log_artifact(eval_report_path, artifact_path="eval_reports")
 
     logger.info(
-        f"Experiment '{config['experiment_name']}' completed. Evaluation report saved to {eval_report_path}"
+        f"Run '{config['run_name']}' completed. Evaluation report saved to {eval_report_path}"
     )
 
     return eval_report
 
 
-def run_experiments(config):
-    """Runs multiple experiments with the given configuration.
+def run_experiment(config):
+    """Execute multiple runs with the given configuration.
     Args:
         config (dict): A configuration dictionary containing all necessary parameters.
     """
     base_config = config["base"]
-    experiment_configs = config["experiments"] or [{}]
-    logger.info(f"Running {len(experiment_configs)} experiments...")
+    run_configs = config["runs"] or [{}]
+    logger.info(f"Running {len(run_configs)} runs...")
 
-    exp_id = mlflow.create_experiment(
-        name=base_config["output"],
-        tags={"type": "generic",
-              "mlflow.note.content": f"Running {len(experiment_configs)} experiments with base config: {base_config}"
-              }
+    mlflow.set_experiment(base_config["experiment_name"])
+    mlflow.set_experiment_tag(
+        "mlflow.note.content",
+        f"Executing {len(run_configs)} runs with base config: {base_config}",
     )
-    mlflow.set_experiment(experiment_id=exp_id)
 
-    os.makedirs(base_config["output"], exist_ok=True)
+    os.makedirs(base_config["output_dir"], exist_ok=True)
 
     if need_denoise := bool(
-        set(experiment_configs[0].keys()).intersection(
-            CONFIG_ATTRIBUTES_REQUIRE_DENOISE
-        )
+        set(run_configs[0].keys()).intersection(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)
     ):
-        logger.info("Denoising is required for each experiment.")
+        logger.info("Denoising is required for each run.")
 
-    train_dataloader = prepare_dataloader(f"{base_config['folder']}/train")
-    test_dataloader = prepare_dataloader(f"{base_config['folder']}/val")
+    train_dataloader = prepare_dataloader(f"{base_config['data_dir']}/train")
+    test_dataloader = prepare_dataloader(f"{base_config['data_dir']}/val")
 
     reports = []
 
     if need_denoise:
-        for exp_config in experiment_configs:
-            # Merge base config with experiment-specific config
-            merged_config = merge_configs(base_config, exp_config)
+        for run_config in run_configs:
+            # Merge base config with run-specific config
+            merged_config = merge_configs(base_config, run_config)
 
             pipeline_and_data = run_denoise(
                 merged_config, train_dataloader, test_dataloader
@@ -1155,25 +1171,27 @@ def run_experiments(config):
     else:
         pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
 
-        for exp_config in experiment_configs:
-            # Merge base config with experiment-specific config
-            merged_config = merge_configs(base_config, exp_config)
+        for run_config in run_configs:
+            # Merge base config with run-specific config
+            merged_config = merge_configs(base_config, run_config)
 
             eval_report = run_extract_features_and_evaluate(
                 merged_config, *pipeline_and_data
             )
             reports.append(eval_report)
 
-    reports = sorted(reports, key=lambda x: len(x["experiment_name"]))
     reports_df = pd.DataFrame(reports)
-    reports_df.to_csv(f"{base_config['output']}/eval_reports.csv", index=False)
+    reports_df.to_csv(f"{base_config['output_dir']}/eval_reports.csv", index=False)
 
-    with mlflow.start_run("reporting"):
+    with mlflow.start_run(f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
         mlflow.log_params(base_config)
-        mlflow.log_artifact(f"{base_config['output']}/eval_reports.csv", artifact_path="eval_reports")
+        mlflow.log_artifact(
+            f"{base_config['output_dir']}/eval_reports.csv",
+            artifact_path="eval_reports",
+        )
 
     logger.info(
-        f"All experiments completed. Evaluation reports saved to {base_config['output']}/eval_reports.csv"
+        f"All runs completed. Evaluation reports saved to {base_config['output_dir']}/eval_reports.csv"
     )
     logger.info(f"Evaluation reports:\n{reports_df}")
 
@@ -1184,25 +1202,25 @@ def run_generalisation_experiment(config):
         config (dict): A configuration dictionary containing all necessary parameters.
     """
     base_config = config["base"]
-    model_dirs = os.listdir(f"{base_config['folder']}/train")
-    os.makedirs(base_config["output"], exist_ok=True)
+    model_dirs = os.listdir(f"{base_config['data_dir']}/train")
+    os.makedirs(base_config["output_dir"], exist_ok=True)
 
-    exp_id = mlflow.create_experiment(
-        name=base_config["output"],
-        tags={"type": "generalisation",
-              "mlflow.note.content": f"Running generalisation experiment with {len(model_dirs)} model directories."
-              }
+    mlflow.set_experiment(base_config["experiment_name"])
+    mlflow.set_experiment_tag(
+        "mlflow.note.content",
+        f"Running generalisation experiment with {len(model_dirs)} model directories.",
     )
-    mlflow.set_experiment(experiment_id=exp_id)
 
-    logger.info(f"Initial CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
+    logger.info(
+        f"Initial CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}"
+    )
 
     train_dataloaders = {
-        model_dir: prepare_dataloader(f"{base_config['folder']}/train/{model_dir}")
+        model_dir: prepare_dataloader(f"{base_config['data_dir']}/train/{model_dir}")
         for model_dir in model_dirs
     }
     test_dataloaders = {
-        model_dir: prepare_dataloader(f"{base_config['folder']}/val/{model_dir}")
+        model_dir: prepare_dataloader(f"{base_config['data_dir']}/val/{model_dir}")
         for model_dir in model_dirs
     }
 
@@ -1214,7 +1232,7 @@ def run_generalisation_experiment(config):
         model_dirs, zip(train_dataloaders.values(), test_dataloaders.values())
     ):
         if os.path.exists(
-            f"{base_config['output']}_denoised_data/pipeline_and_data_{model_dir}.pt"
+            f"{base_config['output_dir']}_denoised_data/pipeline_and_data_{model_dir}.pt"
         ):
             logger.info(
                 f"Pipeline and data for model directory {model_dir} already exists. Skipping..."
@@ -1224,12 +1242,14 @@ def run_generalisation_experiment(config):
         pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
         torch.save(
             pipeline_and_data,
-            f"{base_config['output']}_denoised_data/pipeline_and_data_{model_dir}.pt",
+            f"{base_config['output_dir']}_denoised_data/pipeline_and_data_{model_dir}.pt",
         )
         del pipeline_and_data  # Free memory
         gc.collect()
         torch.cuda.empty_cache()
-        logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
+        logger.info(
+            f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}"
+        )
 
     reports = []
     logger.info("Starting generalisation experiments...")
@@ -1245,17 +1265,17 @@ def run_generalisation_experiment(config):
                 this_val_all_pred_noises_and_noises,
                 this_val_all_labels,
             ) = torch.load(
-                f"{base_config['output']}_denoised_data/pipeline_and_data_{this_model_dir}.pt",
-                weights_only=False
+                f"{base_config['output_dir']}_denoised_data/pipeline_and_data_{this_model_dir}.pt",
+                weights_only=False,
             )
             _, _, _, that_val_all_pred_noises_and_noises, that_val_all_labels = (
                 torch.load(
-                    f"{base_config['output']}_denoised_data/pipeline_and_data_{that_model_dir}.pt",
-                    weights_only=False
+                    f"{base_config['output_dir']}_denoised_data/pipeline_and_data_{that_model_dir}.pt",
+                    weights_only=False,
                 )
             )
 
-            base_config["experiment_name"] = (
+            base_config["run_name"] = (
                 f"generalisation_{this_model_dir}_to_{that_model_dir}"
             )
 
@@ -1290,31 +1310,23 @@ def run_generalisation_experiment(config):
             del that_val_all_pred_noises_and_noises, that_val_all_labels
             gc.collect()
             torch.cuda.empty_cache()
-            logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
+            logger.info(
+                f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}"
+            )
 
     reports_df = pd.DataFrame(reports)
-    reports_df.to_csv(f"{base_config['output']}/eval_reports.csv", index=False)
+    reports_df.to_csv(f"{base_config['output_dir']}/eval_reports.csv", index=False)
 
-    with mlflow.start_run("reporting"):
+    with mlflow.start_run(f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
         mlflow.log_params(base_config)
         mlflow.log_artifact(
-            f"{base_config['output']}/eval_reports.csv", artifact_path="eval_reports"
+            f"{base_config['output_dir']}/eval_reports.csv",
+            artifact_path="eval_reports",
         )
 
     logger.info(
-        f"Generalisation experiments completed. Evaluation reports saved to {base_config['output']}/eval_reports.csv"
+        f"Generalisation experiments completed. Evaluation reports saved to {base_config['output_dir']}/eval_reports.csv"
     )
-
-
-def convert_diffusion_percent_to_float(diffusion_percent: float | str) -> float:
-    if isinstance(diffusion_percent, float) or isinstance(diffusion_percent, int):
-        return float(diffusion_percent)
-
-    match = regex.match(r"^(\d+)\/(\d+)$", diffusion_percent)
-    if not match:
-        raise ValueError(f"Invalid diffusion_percent format: {diffusion_percent}")
-    numerator, denominator = map(int, match.groups())
-    return numerator / denominator
 
 
 def normalise_config(config, datadirs):
@@ -1324,17 +1336,12 @@ def normalise_config(config, datadirs):
     Returns:
         dict: The normalised configuration dictionary.
     """
-    if "diffusion_percent" in config["base"]:
-        config["base"]["diffusion_percent"] = convert_diffusion_percent_to_float(
-            config["base"]["diffusion_percent"]
-        )
+    if "data_dir" in config["base"]:
+        config["base"]["data_dir"] = get_folder(datadirs, config["base"]["data_dir"])
 
-    if "folder" in config["base"]:
-        config["base"]["folder"] = get_folder(datadirs, config["base"]["folder"])
-
-    if IS_ON_GOOGLE_COLAB and "output" in config["base"]:
-        config["base"]["output"] = (
-            f"/content/drive/MyDrive/mypipeline_exps_3/{config['base']['output']}"
+    if IS_ON_GOOGLE_COLAB and "output_dir" in config["base"]:
+        config["base"]["output_dir"] = (
+            f"/content/drive/MyDrive/mypipeline_exps_3/{config['base']['output_dir']}"
         )
 
     if not torch.cuda.is_available():
@@ -1361,8 +1368,6 @@ if __name__ == "__main__":
             default_config = yaml.safe_load(f)
             default_config = normalise_config(default_config, datadirs)
 
-        default_config.update({"experiments": [{}]})
-
         with open(f"{prefix}exps/generalisation/generalisation_exp.yaml", "r") as f:
             generalisation_config = yaml.safe_load(f)
             generalisation_config = normalise_config(generalisation_config, datadirs)
@@ -1385,15 +1390,17 @@ if __name__ == "__main__":
         # )
 
         # for config in other_configs:
-        #     logger.info(f"Running experiment with config: {config['base']['output']}")
+        #     logger.info(f"Running experiment with config: {config['base']['experiment_name']}")
         #     run_experiments(config)
 
         logger.info("Running one full dataset experiment...")
-        run_experiments(full_dataset_config)
+        run_experiment(full_dataset_config)
 
         gc.collect()
         torch.cuda.empty_cache()
-        logger.info(f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}")
+        logger.info(
+            f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}"
+        )
 
         logger.info("Running generalisation experiment...")
         run_generalisation_experiment(generalisation_config)
@@ -1403,7 +1410,6 @@ if __name__ == "__main__":
         raise e
 
     finally:
-        mlflow.create_experiment("logs", tags={"type": "logs"})
         mlflow.set_experiment("logs")
-        with mlflow.start_run("logs"):
+        with mlflow.start_run(f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
             mlflow.log_artifact("mypipeline.log")
