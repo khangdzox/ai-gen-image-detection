@@ -604,6 +604,8 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
     cache = []
     count_batches = 0
 
+    os.makedirs(f"{output_dir}/cache", exist_ok=True)
+
     if os.path.exists(f"{output_dir}/cache/{dataset_root}_{denoise_configs}.pt"):
         logger.info("Loading cached dataset...")
         cache = torch.load(f"{output_dir}/cache/{dataset_root}_{denoise_configs}.pt", weights_only=False)
@@ -973,10 +975,10 @@ def run_denoise(config, train_dataloader, val_dataloader):
 
     # Load and preprocess data
     train_all_pred_noises_and_noises, train_all_labels = run_pipeline_denoise(
-        pipeline, train_dataloader, config["output_dir"], "_".join(config[k] for k in sorted(list(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)))
+        pipeline, train_dataloader, config["output_dir"], "_".join(str(config[k]) for k in sorted(list(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)))
     )
     val_all_pred_noises_and_noises, val_all_labels = run_pipeline_denoise(
-        pipeline, val_dataloader, config["output_dir"], "_".join(config[k] for k in sorted(list(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)))
+        pipeline, val_dataloader, config["output_dir"], "_".join(str(config[k]) for k in sorted(list(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)))
     )
 
     return (
