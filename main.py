@@ -596,7 +596,10 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
 
     dataset_root = dataloader.dataset.root
     dataset_root = dataset_root.replace("\\", "/").split("/")
-    dataset_root = "_".join(dataset_root[:-1])  # Remove the last part (e.g., 'train' or 'val')
+    dataset_root = "_".join(dataset_root)
+
+    denoise_configs = denoise_configs.replace("\\", "/").split("/")
+    denoise_configs = "_".join(denoise_configs)
 
     all_pred_noises_and_noises = []
     all_labels = []
@@ -1424,6 +1427,9 @@ if __name__ == "__main__":
         raise e
 
     finally:
+        gc.collect()
+        torch.cuda.empty_cache()
+
         mlflow.set_experiment("logs")
         with mlflow.start_run(run_name=f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
             mlflow.log_artifact("mypipeline.log")
