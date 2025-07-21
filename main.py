@@ -583,7 +583,7 @@ def prepare_dataloader(folder):
     return dataloader
 
 
-def run_pipeline_denoise(pipeline, dataloader, output_dir, run_name):
+def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
     """Runs the pipeline to denoise images in the DataLoader.
     Args:
         pipeline: The pipeline to use for denoising.
@@ -606,9 +606,9 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, run_name):
     cache = []
     count_batches = 0
 
-    if os.path.exists(f"{output_dir}/cache/{run_name}_{dataset_root}.pt"):
+    if os.path.exists(f"{output_dir}/cache/{dataset_root}_{denoise_configs}.pt"):
         logger.info("Loading cached dataset...")
-        cache = torch.load(f"{output_dir}/cache/{run_name}_{dataset_root}.pt", weights_only=False)
+        cache = torch.load(f"{output_dir}/cache/{dataset_root}_{denoise_configs}.pt", weights_only=False)
 
     for batch, labels in tqdm(dataloader):
         if count_batches < len(cache):
@@ -616,7 +616,7 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, run_name):
         else:
             pred_noises_list, noises_list = pipeline(batch)
             cache.append((pred_noises_list, noises_list))
-            torch.save(cache, f"{output_dir}/cache/{run_name}_{dataset_root}.pt")
+            torch.save(cache, f"{output_dir}/cache/{dataset_root}_{denoise_configs}.pt")
 
         count_batches += 1
         all_pred_noises_and_noises.append((pred_noises_list, noises_list))
@@ -975,10 +975,10 @@ def run_denoise(config, train_dataloader, val_dataloader):
 
     # Load and preprocess data
     train_all_pred_noises_and_noises, train_all_labels = run_pipeline_denoise(
-        pipeline, train_dataloader, config["output_dir"], config["run_name"]
+        pipeline, train_dataloader, config["output_dir"], "_".join(config[k] for k in sorted(list(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)))
     )
     val_all_pred_noises_and_noises, val_all_labels = run_pipeline_denoise(
-        pipeline, val_dataloader, config["output_dir"], config["run_name"]
+        pipeline, val_dataloader, config["output_dir"], "_".join(config[k] for k in sorted(list(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)))
     )
 
     return (
@@ -1197,7 +1197,7 @@ def run_experiment(config):
     reports_df = pd.DataFrame(reports)
     reports_df.to_csv(f"{base_config['output_dir']}/eval_reports.csv", index=False)
 
-    with mlflow.start_run(f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+    with mlflow.start_run(run_name=f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
         mlflow.log_params(base_config)
         mlflow.log_artifact(
             f"{base_config['output_dir']}/eval_reports.csv",
@@ -1331,7 +1331,7 @@ def run_generalisation_experiment(config):
     reports_df = pd.DataFrame(reports)
     reports_df.to_csv(f"{base_config['output_dir']}/eval_reports.csv", index=False)
 
-    with mlflow.start_run(f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+    with mlflow.start_run(run_name=f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
         mlflow.log_params(base_config)
         mlflow.log_artifact(
             f"{base_config['output_dir']}/eval_reports.csv",
@@ -1425,5 +1425,5 @@ if __name__ == "__main__":
 
     finally:
         mlflow.set_experiment("logs")
-        with mlflow.start_run(f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+        with mlflow.start_run(run_name=f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
             mlflow.log_artifact("mypipeline.log")
