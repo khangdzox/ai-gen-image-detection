@@ -32,7 +32,7 @@ CONFIG_ATTRIBUTES_REQUIRE_DENOISE = {
     "test_samples",
     "hf_repo",
     "timesteps",
-    "diffusion_percent",
+    "diffusion_steps",
 }
 
 # Set up logger
