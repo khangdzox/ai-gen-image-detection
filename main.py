@@ -36,19 +36,33 @@ CONFIG_ATTRIBUTES_REQUIRE_DENOISE = {
 }
 
 # Set up logger
-logging.basicConfig(
-    filename="mypipeline.log",
-    encoding="utf-8",
-    filemode="a",
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    force=True,
-)
-
+# Create a custom logger
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Set the desired logging level
 
-stdout = logging.StreamHandler()
-logger.addHandler(stdout)
+# Prevent propagation to the root logger
+logger.propagate = False
+
+# Check if handlers already exist to avoid duplicate logs in Colab
+if not logger.handlers:
+    # Create a file handler
+    file_handler = logging.FileHandler("mypipeline.log", mode='a', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+
+    # Create a stream handler for stdout
+    stdout = logging.StreamHandler()
+    stdout.setLevel(logging.INFO)
+
+    # Create a formatter
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+    )
+    file_handler.setFormatter(formatter)
+    stdout.setFormatter(formatter)
+
+    # Add the handler to the logger
+    logger.addHandler(file_handler)
+    logger.addHandler(stdout)
 
 logger.info("################# Starting mypipeline... #################")
 
