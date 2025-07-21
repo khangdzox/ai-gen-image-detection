@@ -1,10 +1,11 @@
 base:
-  folder: data_aio
-  output: features_40_1_2_exp
+  experiment_name: features_20_40_exp
+  data_dir: data_aio
+  output_dir: features_20_40_exp
   seed: 42
   hf_repo: CompVis/stable-diffusion-v1-4
   timesteps: 40
-  diffusion_percent: 0.5
+  diffusion_steps: 20
   device: cuda
 
   classifier_type: lstm
@@ -17,78 +18,78 @@ base:
   lr: 1.e-3
   weight_decay: 1.e-5
 
-experiments:
-  - experiment_name: noise_stats
+runs:
+  - run_name: ns
     included_features:
       - noise_stats
 
-  - experiment_name: noise_fft
+  - run_name: nfft
     included_features:
       - noise_fft
 
-  - experiment_name: residual_stats
+  - run_name: rs
     included_features:
       - residual_stats
 
-  - experiment_name: cos_sim
+  - run_name: cs
     included_features:
       - cos_sim
 
-  - experiment_name: noise_stats noise_fft
+  - run_name: ns_nfft
     included_features:
       - noise_stats
       - noise_fft
 
-  - experiment_name: noise_stats residual_stats
+  - run_name: ns_rs
     included_features:
       - noise_stats
       - residual_stats
 
-  - experiment_name: noise_stats cos_sim
+  - run_name: ns_cs
     included_features:
       - noise_stats
       - cos_sim
 
-  - experiment_name: noise_fft residual_stats
+  - run_name: nfft_rs
     included_features:
       - noise_fft
       - residual_stats
 
-  - experiment_name: noise_fft cos_sim
+  - run_name: nfft_cs
     included_features:
       - noise_fft
       - cos_sim
 
-  - experiment_name: residual_stats cos_sim
+  - run_name: rs_cs
     included_features:
       - residual_stats
       - cos_sim
 
-  - experiment_name: noise_stats noise_fft residual_stats
+  - run_name: ns_nfft_rs
     included_features:
       - noise_stats
       - noise_fft
       - residual_stats
 
-  - experiment_name: noise_stats noise_fft cos_sim
+  - run_name: ns_nfft_cs
     included_features:
       - noise_stats
       - noise_fft
       - cos_sim
 
-  - experiment_name: noise_stats residual_stats cos_sim
+  - run_name: ns_rs_cs
     included_features:
       - noise_stats
       - residual_stats
       - cos_sim
 
-  - experiment_name: noise_fft residual_stats cos_sim
+  - run_name: nfft_rs_cs
     included_features:
       - noise_fft
       - residual_stats
       - cos_sim
 
-  - experiment_name: noise_stats noise_fft residual_stats cos_sim
+  - run_name: ns_nfft_rs_cs
     included_features:
       - noise_stats
       - noise_fft

@@ -1,10 +1,11 @@
 base:
-  folder: data_aio
-  output: full_dataset_exp
+  experiment_name: full_dataset_exp
+  data_dir: data_aio
+  output_dir: full_dataset_exp
   seed: 42
   hf_repo: CompVis/stable-diffusion-v1-4
   timesteps: 30
-  diffusion_percent: 2/3
+  diffusion_steps: 20
   device: cuda
 
   classifier_type: lstm
@@ -17,20 +18,20 @@ base:
   lr: 1.e-3
   weight_decay: 1.e-5
 
-experiments:
+runs:
 
-  - experiment_name: ns_nfft
+  - run_name: ns_nfft
     included_features:
       - noise_stats
       - noise_fft
 
-  - experiment_name: ns_rs_cs
+  - run_name: ns_rs_cs
     included_features:
       - noise_stats
       - residual_stats
       - cos_sim
 
-  - experiment_name: ns_nfft_cs
+  - run_name: ns_nfft_cs
     included_features:
       - noise_stats
       - noise_fft
