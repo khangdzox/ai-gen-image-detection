@@ -28,8 +28,6 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 
 CONFIG_ATTRIBUTES_REQUIRE_DENOISE = {
-    "train_samples",
-    "test_samples",
     "hf_repo",
     "timesteps",
     "diffusion_steps",
