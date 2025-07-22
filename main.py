@@ -604,22 +604,16 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
     all_pred_noises_and_noises = []
     all_labels = []
 
-    cache = []
     count_batches = 0
 
     os.makedirs(f"{output_dir}/cache", exist_ok=True)
 
-    if os.path.exists(f"{output_dir}/cache/{dataset_root}_{denoise_configs}.pt"):
-        logger.info("Loading cached dataset...")
-        cache = torch.load(f"{output_dir}/cache/{dataset_root}_{denoise_configs}.pt", weights_only=False)
-
     for batch, labels in tqdm(dataloader):
-        if count_batches < len(cache):
-            pred_noises_list, noises_list = cache[count_batches]
+        if os.path.exists(f"{output_dir}/cache/{dataset_root}_{denoise_configs}_{count_batches}.pt"):
+            pred_noises_list, noises_list = torch.load(f"{output_dir}/cache/{dataset_root}_{denoise_configs}_{count_batches}.pt", weights_only=False)
         else:
             pred_noises_list, noises_list = pipeline(batch)
-            cache.append((pred_noises_list, noises_list))
-            torch.save(cache, f"{output_dir}/cache/{dataset_root}_{denoise_configs}.pt")
+            torch.save((pred_noises_list, noises_list), f"{output_dir}/cache/{dataset_root}_{denoise_configs}_{count_batches}.pt")
 
         count_batches += 1
         all_pred_noises_and_noises.append((pred_noises_list, noises_list))
