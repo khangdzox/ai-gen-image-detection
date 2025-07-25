@@ -1557,12 +1557,12 @@ except ImportError:
 
 
 if __name__ == "__main__":
-    # parser = ArgumentParser(prog="MyPipeline Experiment")
-    # parser.add_argument("config")
+    parser = ArgumentParser(prog="MyPipeline Experiment")
+    parser.add_argument("config")
 
-    # args = parser.parse_args()
+    args = parser.parse_args()
 
-    # main(args.config)
+    main(args.config)
 
     # Quick code for running on Google Colab
 
@@ -1571,4 +1571,4 @@ if __name__ == "__main__":
     # for exp_file in os.listdir("/content/drive/MyDrive/mypipeline_exps_confs/exps/others"):
     #     main(f"/content/drive/MyDrive/mypipeline_exps_confs/exps/others/{exp_file}")
 
-    main("/content/drive/MyDrive/mypipeline_exps_confs/exps/others/full_dataset_exp_colab.yaml")
+    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/others/full_dataset_exp_colab.yaml")
