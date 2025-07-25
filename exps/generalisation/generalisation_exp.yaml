@@ -1,8 +1,13 @@
+experiment_name: generalisation_experiment
+type: generalisation
+data_dir: data
+output_dir: generalisation_experiment
+x_train_samples: 400
+x_test_samples: 100
+
 base:
-  experiment_name: generalisation_experiment
-  data_dir: data
-  output_dir: generalisation_exp
   seed: 42
+
   hf_repo: CompVis/stable-diffusion-v1-4
   timesteps: 30
   diffusion_steps: 20

@@ -1,12 +1,27 @@
+
+# Name of the experiment
+experiment_name: default_experiment
+
+# Type of the experiment. One of [generic, generalisation]
+type: generic
+
+# Path to the folder containing the data. One of [data, data_x, data_aio, data_aio_x]
+# _x directories have fewer samples than the full dataset for quick experiments.
+data_dir: data_aio_x
+
+# Output directory for the experiment results
+output_dir: output
+
+# Number of training samples in _x data directories to use for each model
+x_train_samples: 400
+
+# Number of test samples in _x data directories to use for each model
+x_test_samples: 100
+
 base:
-  # Name of the experiment
-  experiment_name: default_experiment
 
-  # Path to the folder containing the data. One of [data, data_aio, data_aio_x]
-  data_dir: data_aio_x
-
-  # Output directory for the experiment results
-  output_dir: output
+  # Name of the run.
+  run_name: this_will_be_overridden
 
   # Random seed for reproducibility
   seed: 42
@@ -22,7 +37,6 @@ base:
 
   # Device to run the experiments on
   device: cuda
-
 
   # Type of classifier to use. One of [lstm, gru, transformer]
   classifier_type: lstm

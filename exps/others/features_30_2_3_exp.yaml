@@ -1,8 +1,13 @@
+experiment_name: features_20_30_exp
+type: generic
+data_dir: data_aio
+output_dir: features_20_30_exp
+x_train_samples: 400
+x_test_samples: 100
+
 base:
-  experiment_name: features_20_30_exp
-  data_dir: data_aio
-  output_dir: features_20_30_exp
   seed: 42
+
   hf_repo: CompVis/stable-diffusion-v1-4
   timesteps: 30
   diffusion_steps: 20

@@ -1,8 +1,13 @@
+experiment_name: full_dataset_exp
+type: generic
+data_dir: data_aio
+output_dir: full_dataset_exp
+x_train_samples: 400
+x_test_samples: 100
+
 base:
-  experiment_name: full_dataset_exp
-  data_dir: data_aio
-  output_dir: full_dataset_exp
   seed: 42
+
   hf_repo: CompVis/stable-diffusion-v1-4
   timesteps: 30
   diffusion_steps: 20
@@ -20,18 +25,47 @@ base:
 
 runs:
 
-  - run_name: ns_nfft
+  - run_name: ns_nfft_3l_200e
+    num_layers: 3
+    epochs: 200
     included_features:
       - noise_stats
       - noise_fft
 
-  - run_name: ns_rs_cs
+  - run_name: ns_rs_cs_3l_200e
+    num_layers: 3
+    epochs: 200
     included_features:
       - noise_stats
       - residual_stats
       - cos_sim
 
-  - run_name: ns_nfft_cs
+  - run_name: ns_nfft_cs_3l_200e
+    num_layers: 3
+    epochs: 200
+    included_features:
+      - noise_stats
+      - noise_fft
+      - cos_sim
+
+  - run_name: ns_nfft_1l_50e
+    num_layers: 1
+    epochs: 50
+    included_features:
+      - noise_stats
+      - noise_fft
+
+  - run_name: ns_rs_cs_1l_50e
+    num_layers: 1
+    epochs: 50
+    included_features:
+      - noise_stats
+      - residual_stats
+      - cos_sim
+
+  - run_name: ns_nfft_cs_1l_50e
+    num_layers: 1
+    epochs: 50
     included_features:
       - noise_stats
       - noise_fft
