@@ -1,0 +1,32 @@
+experiment_name: generalisation_experiment_sd14
+type: generalisation
+data_dir: data
+output_dir: generalisation_experiment_sd14
+x_train_samples: 400
+x_test_samples: 100
+
+base:
+  seed: 42
+
+  hf_repo: CompVis/stable-diffusion-v1-4
+  timesteps: 30
+  diffusion_steps: 20
+  device: cuda
+
+  classifier_type: lstm
+  hidden_size: 64
+  num_layers: 3
+  num_classes: 2
+
+  batch_size: 8
+  epochs: 200
+  lr: 1.e-3
+  weight_decay: 1.e-5
+
+  included_features:
+    - noise_stats
+    - noise_fft
+    - cos_sim
+
+runs:
+  - run_name: generalisation_run
