@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "accelerate>=1.8.1",
+    "boto3>=1.39.13",
     "diffusers>=0.33.1",
     "ftfy>=6.3.1",
     "hf-xet>=1.1.4",

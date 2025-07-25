@@ -4,8 +4,8 @@ import gc
 import json
 import logging
 import os
-from pprint import pformat
 import random
+from pprint import pformat
 from datetime import datetime
 
 import kagglehub
@@ -35,7 +35,16 @@ CONFIG_ALLOWED_CLASSIFIER_TYPE = {"lstm", "gru", "transformer"}
 CONFIG_ALLOWED_DEVICE = {"cuda", "cpu"}
 CONFIG_ALLOWED_FEATURES = {"noise_stats", "noise_fft", "residual_stats", "cos_sim"}
 
-CONFIG_REQUIRED_KEYS = {"experiment_name", "type", "data_dir", "output_dir", "x_train_samples", "x_test_samples", "base", "runs"}
+CONFIG_REQUIRED_KEYS = {
+    "experiment_name",
+    "type",
+    "data_dir",
+    "output_dir",
+    "x_train_samples",
+    "x_test_samples",
+    "base",
+    "runs",
+}
 CONFIG_RUN_REQUIRED_KEYS = {
     "run_name",
     "seed",
@@ -117,7 +126,10 @@ if not logger.handlers:
 
 logger.info("################# Starting mypipeline... #################")
 
-mlflow.set_tracking_uri("http://103.21.1.103:10000")
+mlflow.set_tracking_uri("http://103.21.1.103:25000")
+os.environ["AWS_ACCESS_KEY_ID"] = "khangvo3103"
+os.environ["AWS_SECRET_ACCESS_KEY"] = "vk3103@minio"
+os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://103.21.1.103:25001"
 
 
 def plot_embedding(X_embedded, labels, title="Embedding"):
@@ -683,7 +695,9 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
 
     count_batches = 0
 
-    os.makedirs(f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}", exist_ok=True)
+    os.makedirs(
+        f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}", exist_ok=True
+    )
 
     for batch, labels in tqdm(dataloader):
         if not os.path.exists(
@@ -719,7 +733,9 @@ def run_pipeline_extract_features(
 
     try:
         for batch in os.listdir(denoise_path):
-            pred_noises_list, noises_list, labels = torch.load(f"{denoise_path}/{batch}", weights_only=False)
+            pred_noises_list, noises_list, labels = torch.load(
+                f"{denoise_path}/{batch}", weights_only=False
+            )
             features = pipeline.extract_features(
                 pred_noises_list, noises_list, included_features
             )
@@ -1027,17 +1043,13 @@ def run_denoise(config, pipeline, train_dataloader, val_dataloader):
         pipeline,
         train_dataloader,
         config["output_dir"],
-        "_".join(
-            str(config[k]) for k in sorted(list(CONFIG_KEYS_REQUIRE_DENOISE))
-        ),
+        "_".join(str(config[k]) for k in sorted(list(CONFIG_KEYS_REQUIRE_DENOISE))),
     )
     val_denoise_path = run_pipeline_denoise(
         pipeline,
         val_dataloader,
         config["output_dir"],
-        "_".join(
-            str(config[k]) for k in sorted(list(CONFIG_KEYS_REQUIRE_DENOISE))
-        ),
+        "_".join(str(config[k]) for k in sorted(list(CONFIG_KEYS_REQUIRE_DENOISE))),
     )
 
     gc.collect()
@@ -1204,8 +1216,12 @@ def run_experiment(base_config, run_configs):
     ):
         logger.info("Denoising is required for each run.")
 
-    train_dataloader = prepare_dataloader(f"{base_config['data_dir']}/train", batch_size=base_config["batch_size"])
-    test_dataloader = prepare_dataloader(f"{base_config['data_dir']}/val", batch_size=base_config["batch_size"])
+    train_dataloader = prepare_dataloader(
+        f"{base_config['data_dir']}/train", batch_size=base_config["batch_size"]
+    )
+    test_dataloader = prepare_dataloader(
+        f"{base_config['data_dir']}/val", batch_size=base_config["batch_size"]
+    )
 
     reports = []
 
@@ -1234,7 +1250,6 @@ def run_experiment(base_config, run_configs):
             reports.append(eval_report)
 
     else:
-
         # Set random seeds for reproducibility
         set_random_seed(base_config["seed"])
 
@@ -1246,7 +1261,9 @@ def run_experiment(base_config, run_configs):
             device=base_config["device"],
         )
 
-        denoise_paths = run_denoise(base_config, pipeline, train_dataloader, test_dataloader)
+        denoise_paths = run_denoise(
+            base_config, pipeline, train_dataloader, test_dataloader
+        )
 
         for run_config in run_configs:
             # Merge base config with run-specific config
@@ -1297,8 +1314,9 @@ def run_generalisation_experiment(base_config, run_configs):
     for model_dir, (train_dataloader, test_dataloader) in zip(
         model_dirs, zip(train_dataloaders.values(), test_dataloaders.values())
     ):
-
-        denoise_paths = run_denoise(base_config, pipeline, train_dataloader, test_dataloader)
+        denoise_paths = run_denoise(
+            base_config, pipeline, train_dataloader, test_dataloader
+        )
 
         model_denoise_paths[model_dir] = denoise_paths
 
@@ -1306,7 +1324,8 @@ def run_generalisation_experiment(base_config, run_configs):
     logger.info("Starting generalisation experiments...")
 
     for this_model_dir in model_dirs:  # pnd is pipeline_and_data
-        for that_model_dir in model_dirs:  # inner loop to iterate over each model directory
+        # inner loop to iterate over each model directory
+        for that_model_dir in model_dirs:
             (
                 this_train_denoise_path,
                 this_val_denoise_path,
@@ -1409,7 +1428,7 @@ def validate_config(config):
     ):
         raise ValueError(
             "Configuration 'base' must be a dictionary and 'runs' must be a list of dictionaries."
-    )
+        )
 
     if config["type"] not in CONFIG_ALLOWED_TYPE:
         raise ValueError(
@@ -1429,7 +1448,10 @@ def validate_config(config):
                 f"Found unrecognized keys: {set(run_config.keys()) - CONFIG_RUN_REQUIRED_KEYS}"
             )
 
-        if "classifier_type" in run_config and run_config["classifier_type"] not in CONFIG_ALLOWED_CLASSIFIER_TYPE:
+        if (
+            "classifier_type" in run_config
+            and run_config["classifier_type"] not in CONFIG_ALLOWED_CLASSIFIER_TYPE
+        ):
             raise ValueError(
                 f"Configuration 'classifier_type' must be one of {CONFIG_ALLOWED_CLASSIFIER_TYPE}. "
                 f"Found: {run_config['classifier_type']}"
@@ -1441,10 +1463,12 @@ def validate_config(config):
                 f"Found: {run_config['device']}"
             )
 
-        if "included_features" in run_config and set(run_config["included_features"]).issubset(CONFIG_ALLOWED_FEATURES):
+        if "included_features" in run_config and set(
+            run_config["included_features"]
+        ).issubset(CONFIG_ALLOWED_FEATURES):
             raise ValueError(
                 f"Configuration 'included_features' must be a subset of {CONFIG_ALLOWED_FEATURES}. "
-                f"Found: {set(run_config["included_features"]).intersection(CONFIG_ALLOWED_FEATURES)}"
+                f"Found: {set(run_config['included_features']).intersection(CONFIG_ALLOWED_FEATURES)}"
             )
 
     validate_run_config(config["base"])
@@ -1466,6 +1490,8 @@ def main(config_path):
 
     validate_config(config)
 
+    config = merge_configs(CONFIG_DEFAULT, config)
+
     config = normalise_config(config)
 
     mlflow.set_experiment(config["experiment_name"])
@@ -1483,21 +1509,14 @@ def main(config_path):
     base_config = config["base"]
     run_configs = config["runs"] or [{}]
     base_config["data_dir"] = datadir_map[config["data_dir"]]
-    base_config["output_dir"] = base_config['output_dir']
+    base_config["output_dir"] = base_config["output_dir"]
 
     try:
-
         # Run experiment
         if config["type"] == "generic":
-            reports = run_experiment(
-                base_config,
-                run_configs
-            )
+            reports = run_experiment(base_config, run_configs)
         elif config["type"] == "generalisation":
-            reports = run_generalisation_experiment(
-                base_config,
-                run_configs
-            )
+            reports = run_generalisation_experiment(base_config, run_configs)
         else:
             reports = []
 
@@ -1525,14 +1544,15 @@ def main(config_path):
         gc.collect()
         torch.cuda.empty_cache()
 
-        with mlflow.start_run(run_name=f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+        with mlflow.start_run(
+            run_name=f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        ):
             mlflow.log_artifact("mypipeline.log")
 
 
 if __name__ == "__main__":
-
     parser = ArgumentParser(prog="MyPipeline Experiment")
-    parser.add_argument('config')
+    parser.add_argument("config")
 
     args = parser.parse_args()
 
@@ -1544,4 +1564,3 @@ if __name__ == "__main__":
 
     # for exp_file in os.listdir("/content/drive/MyDrive/mypipeline_exps_confs/exps/others"):
     #     main(f"/content/drive/MyDrive/mypipeline_exps_confs/exps/others/{exp_file}")
-
