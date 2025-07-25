@@ -497,14 +497,14 @@ def download_and_prepare_data(
         for split in ["train", "val"]:
             for subdir, newname in [("nature", "0_real"), ("ai", "1_fake")]:
                 os.makedirs(
-                    f"{output_dir}/data/{split}/{model_dir}/{newname}", exist_ok=True
+                    f"{output_dir}/dataset/data/{split}/{model_dir}/{newname}", exist_ok=True
                 )
 
                 for file in os.listdir(f"{datapath}/{model_dir}/{split}/{subdir}"):
                     try:
                         os.symlink(
                             f"{datapath}/{model_dir}/{split}/{subdir}/{file}",
-                            f"{output_dir}/data/{split}/{model_dir}/{newname}/{file}",
+                            f"{output_dir}/dataset/data/{split}/{model_dir}/{newname}/{file}",
                         )
                     except FileExistsError:
                         pass
@@ -513,19 +513,19 @@ def download_and_prepare_data(
     logger.info("Joining all real and fake images into 'data_aio'...")
 
     for split in ["train", "val"]:
-        for model_dir in os.listdir(f"{output_dir}/data/{split}"):
+        for model_dir in os.listdir(f"{output_dir}/dataset/data/{split}"):
             for class_dir in ["0_real", "1_fake"]:
-                os.makedirs(f"{output_dir}/data_aio/{split}/{class_dir}", exist_ok=True)
+                os.makedirs(f"{output_dir}/dataset/data_aio/{split}/{class_dir}", exist_ok=True)
 
                 for file in os.listdir(
-                    f"{output_dir}/data/{split}/{model_dir}/{class_dir}"
+                    f"{output_dir}/dataset/data/{split}/{model_dir}/{class_dir}"
                 ):
                     try:
                         os.symlink(
                             os.readlink(
-                                f"{output_dir}/data/{split}/{model_dir}/{class_dir}/{file}"
+                                f"{output_dir}/dataset/data/{split}/{model_dir}/{class_dir}/{file}"
                             ),
-                            f"{output_dir}/data_aio/{split}/{class_dir}/{model_dir}_{file}",
+                            f"{output_dir}/dataset/data_aio/{split}/{class_dir}/{model_dir}_{file}",
                         )
                     except FileExistsError:
                         pass
@@ -540,7 +540,7 @@ def download_and_prepare_data(
             for split in ["train", "val"]:
                 for subdir, newname in [("nature", "0_real"), ("ai", "1_fake")]:
                     os.makedirs(
-                        f"{output_dir}/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{newname}",
+                        f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{newname}",
                         exist_ok=True,
                     )
 
@@ -555,41 +555,41 @@ def download_and_prepare_data(
                         try:
                             os.symlink(
                                 f"{datapath}/{model_dir}/{split}/{subdir}/{file}",
-                                f"{output_dir}/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{newname}/{file}",
+                                f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{newname}/{file}",
                             )
                         except FileExistsError:
                             pass
 
         for split in ["train", "val"]:
             for model_dir in os.listdir(
-                f"data_{num_train_samples}_{num_test_samples}/{split}"
+                f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}"
             ):
                 for class_dir in ["0_real", "1_fake"]:
                     os.makedirs(
-                        f"{output_dir}/data_aio_{num_train_samples}_{num_test_samples}/{split}/{class_dir}",
+                        f"{output_dir}/dataset/data_aio_{num_train_samples}_{num_test_samples}/{split}/{class_dir}",
                         exist_ok=True,
                     )
 
                     for file in os.listdir(
-                        f"{output_dir}/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{class_dir}"
+                        f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{class_dir}"
                     ):
                         try:
                             os.symlink(
                                 os.readlink(
-                                    f"{output_dir}/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{class_dir}/{file}"
+                                    f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{class_dir}/{file}"
                                 ),
-                                f"{output_dir}/data_aio_{num_samples}/{split}/{class_dir}/{model_dir}_{file}",
+                                f"{output_dir}/dataset/data_aio_{num_train_samples}_{num_test_samples}/{split}/{class_dir}/{model_dir}_{file}",
                             )
                         except FileExistsError:
                             pass
 
     return {
-        "data": "{output_dir}/data",
-        "data_x": f"{output_dir}/data_{num_train_samples}_{num_test_samples}"
+        "data": "{output_dir}/dataset/data",
+        "data_x": f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}"
         if num_samples > 0
         else None,
-        "data_aio": "{output_dir}/data_aio",
-        "data_aio_x": f"{output_dir}/data_aio_{num_train_samples}_{num_test_samples}"
+        "data_aio": "{output_dir}/dataset/data_aio",
+        "data_aio_x": f"{output_dir}/dataset/data_aio_{num_train_samples}_{num_test_samples}"
         if num_samples > 0
         else None,
     }
@@ -698,6 +698,8 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
     os.makedirs(
         f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}", exist_ok=True
     )
+
+    logger.info(f"Looking for and storing denoised data in {output_dir}/denoise_cache/{dataset_root}_{denoise_configs}")
 
     for batch, labels in tqdm(dataloader):
         if not os.path.exists(
@@ -1143,7 +1145,7 @@ def run_extract_features_and_evaluate(
                 "diffusion_steps": config["diffusion_steps"],
                 "hidden_size": config["hidden_size"],
                 "num_layers": config["num_layers"],
-                "batch_size": config["batch_size"],
+                "batch_size": config["batch_size"] * 2,  # Adjusted for larger batch size
                 "epochs": config["epochs"],
                 "learning_rate": config["lr"],
                 "weight_decay": config["weight_decay"],
@@ -1157,7 +1159,7 @@ def run_extract_features_and_evaluate(
             train_labels_ts,
             val_features_ts,
             val_labels_ts,
-            config["batch_size"],
+            config["batch_size"] * 2,
             config["epochs"],
             config["lr"],
             config["weight_decay"],
@@ -1165,6 +1167,7 @@ def run_extract_features_and_evaluate(
         )
 
         # Save the trained model
+        os.makedirs(f"{config['output_dir']}/models", exist_ok=True)
         model_save_path = f"{config['output_dir']}/models/model_{config['run_name']}.pt"
         torch.save(best_model_state_dict, model_save_path)
 
@@ -1177,7 +1180,7 @@ def run_extract_features_and_evaluate(
             trained_classifier,
             test_features_ts,
             test_labels_ts,
-            config["batch_size"],
+            config["batch_size"] * 2,
             config["device"],
         )
 
@@ -1190,6 +1193,7 @@ def run_extract_features_and_evaluate(
             f"{config['output_dir']}/reports/eval_report_{config['run_name']}.json"
         )
 
+        os.makedirs(f"{config['output_dir']}/reports/", exist_ok=True)
         with open(eval_report_path, "w") as f:
             json.dump(eval_report, f)
 
@@ -1357,17 +1361,6 @@ def run_generalisation_experiment(base_config, run_configs):
     return reports
 
 
-try:
-    from google.colab import drive  # type:ignore
-
-    drive.mount("/content/drive")
-    output_prefix = "/content/drive/MyDrive/mypipeline_exps_3/"
-    IS_ON_GOOGLE_COLAB = True
-except ImportError:
-    output_prefix = ""
-    IS_ON_GOOGLE_COLAB = False
-
-
 def merge_configs(base_config, experiment_config):
     """Merges the base configuration with the experiment-specific configuration.
     Args:
@@ -1388,14 +1381,12 @@ def normalise_config(config):
     Returns:
         dict: The normalised configuration dictionary.
     """
+    if IS_ON_GOOGLE_COLAB and "output_dir" in config:
+        config["output_dir"] = f"{output_prefix}{config['output_dir']}"
 
     def normalise_run_config(run_config):
-        if IS_ON_GOOGLE_COLAB and "output_dir" in run_config:
-            run_config["output_dir"] = f"{output_prefix}{run_config['output_dir']}"
-
         if not torch.cuda.is_available():
             run_config["device"] = "cpu"
-
         return run_config
 
     config["base"] = normalise_run_config(config["base"])
@@ -1509,7 +1500,7 @@ def main(config_path):
     base_config = config["base"]
     run_configs = config["runs"] or [{}]
     base_config["data_dir"] = datadir_map[config["data_dir"]]
-    base_config["output_dir"] = base_config["output_dir"]
+    base_config["output_dir"] = config["output_dir"]
 
     try:
         # Run experiment
@@ -1527,13 +1518,17 @@ def main(config_path):
             run_name=f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         ):
             mlflow.log_params(base_config)
+            mlflow.log_table(
+                reports_df,
+                artifact_file="reports/eval_reports.json",
+            )
             mlflow.log_artifact(
                 f"{base_config['output_dir']}/eval_reports.csv",
                 artifact_path="reports",
             )
 
         logger.info(
-            f"Experiment {base_config['experiment_name']} completed. Evaluation reports saved to {base_config['output_dir']}/eval_reports.csv"
+            f"Experiment {config['experiment_name']} completed. Evaluation reports saved to {base_config['output_dir']}/eval_reports.csv"
         )
         logger.info(f"Evaluation reports:\n{reports_df}")
 
@@ -1550,13 +1545,24 @@ def main(config_path):
             mlflow.log_artifact("mypipeline.log")
 
 
+try:
+    from google.colab import drive  # type:ignore
+
+    drive.mount("/content/drive")
+    output_prefix = "/content/drive/MyDrive/mypipeline_exps_5_1/"
+    IS_ON_GOOGLE_COLAB = True
+except ImportError:
+    output_prefix = ""
+    IS_ON_GOOGLE_COLAB = False
+
+
 if __name__ == "__main__":
-    parser = ArgumentParser(prog="MyPipeline Experiment")
-    parser.add_argument("config")
+    # parser = ArgumentParser(prog="MyPipeline Experiment")
+    # parser.add_argument("config")
 
-    args = parser.parse_args()
+    # args = parser.parse_args()
 
-    main(args.config)
+    # main(args.config)
 
     # Quick code for running on Google Colab
 
@@ -1564,3 +1570,5 @@ if __name__ == "__main__":
 
     # for exp_file in os.listdir("/content/drive/MyDrive/mypipeline_exps_confs/exps/others"):
     #     main(f"/content/drive/MyDrive/mypipeline_exps_confs/exps/others/{exp_file}")
+
+    main("/content/drive/MyDrive/mypipeline_exps_confs/exps/others/full_dataset_exp_colab.yaml")
