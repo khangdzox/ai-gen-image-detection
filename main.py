@@ -1463,12 +1463,12 @@ def validate_config(config):
                 f"Found: {run_config['device']}"
             )
 
-        if "included_features" in run_config and set(
+        if "included_features" in run_config and not set(
             run_config["included_features"]
         ).issubset(CONFIG_ALLOWED_FEATURES):
             raise ValueError(
                 f"Configuration 'included_features' must be a subset of {CONFIG_ALLOWED_FEATURES}. "
-                f"Found: {set(run_config['included_features']).intersection(CONFIG_ALLOWED_FEATURES)}"
+                f"Found: {set(run_config['included_features']) - CONFIG_ALLOWED_FEATURES}"
             )
 
     validate_run_config(config["base"])
