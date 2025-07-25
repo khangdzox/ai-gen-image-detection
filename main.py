@@ -1,10 +1,12 @@
+from argparse import ArgumentParser
 import copy
-from datetime import datetime
 import gc
 import json
 import logging
 import os
+from pprint import pformat
 import random
+from datetime import datetime
 
 import kagglehub
 import matplotlib.pyplot as plt
@@ -27,10 +29,61 @@ from sklearn.metrics import (
 from torchvision import transforms
 from tqdm.auto import tqdm
 
-CONFIG_ATTRIBUTES_REQUIRE_DENOISE = {
+CONFIG_ALLOWED_TYPE = {"generalisation", "generic"}
+CONFIG_ALLOWED_DATA_DIR = {"data", "data_x", "data_aio", "data_aio_x"}
+CONFIG_ALLOWED_CLASSIFIER_TYPE = {"lstm", "gru", "transformer"}
+CONFIG_ALLOWED_DEVICE = {"cuda", "cpu"}
+CONFIG_ALLOWED_FEATURES = {"noise_stats", "noise_fft", "residual_stats", "cos_sim"}
+
+CONFIG_REQUIRED_KEYS = {"experiment_name", "type", "data_dir", "output_dir", "x_train_samples", "x_test_samples", "base", "runs"}
+CONFIG_RUN_REQUIRED_KEYS = {
+    "run_name",
+    "seed",
     "hf_repo",
     "timesteps",
     "diffusion_steps",
+    "device",
+    "classifier_type",
+    "hidden_size",
+    "num_layers",
+    "num_classes",
+    "batch_size",
+    "epochs",
+    "lr",
+    "weight_decay",
+    "included_features",
+}
+
+CONFIG_KEYS_REQUIRE_DENOISE = {
+    "hf_repo",
+    "timesteps",
+    "diffusion_steps",
+}
+
+CONFIG_DEFAULT = {
+    "experiment_name": "default_experiment",
+    "data_dir": "data_aio_x",
+    "output_dir": "output",
+    "x_train_samples": 400,
+    "x_test_samples": 100,
+    "base": {
+        "run_name": "this_will_be_overridden",
+        "seed": 42,
+        "hf_repo": "CompVis/stable-diffusion-v1-4",
+        "timesteps": 30,
+        "diffusion_steps": 10,
+        "device": "cuda",
+        "classifier_type": "lstm",
+        "hidden_size": 64,
+        "num_layers": 1,
+        "num_classes": 2,
+        "batch_size": 8,
+        "epochs": 50,
+        "lr": 1e-3,
+        "weight_decay": 1e-5,
+        "included_features": ["noise_stats", "noise_fft", "residual_stats", "cos_sim"],
+    },
+    "runs": [{"run_name": "default_run"}],
 }
 
 # Set up logger
@@ -44,7 +97,7 @@ logger.propagate = False
 # Check if handlers already exist to avoid duplicate logs in Colab
 if not logger.handlers:
     # Create a file handler
-    file_handler = logging.FileHandler("mypipeline.log", mode='a', encoding='utf-8')
+    file_handler = logging.FileHandler("mypipeline.log", mode="a", encoding="utf-8")
     file_handler.setLevel(logging.INFO)
 
     # Create a stream handler for stdout
@@ -418,7 +471,9 @@ class TransformerClassifier(torch.nn.Module):
         return x
 
 
-def download_and_prepare_data(num_train_samples=400, num_test_samples=100):
+def download_and_prepare_data(
+    output_dir="", num_train_samples=400, num_test_samples=100
+):
     # Download the dataset from Kaggle
     logger.info("Downloading dataset from Kaggle...")
     datapath = kagglehub.dataset_download("yangsangtai/tiny-genimage")
@@ -429,13 +484,15 @@ def download_and_prepare_data(num_train_samples=400, num_test_samples=100):
     for model_dir in os.listdir(datapath):
         for split in ["train", "val"]:
             for subdir, newname in [("nature", "0_real"), ("ai", "1_fake")]:
-                os.makedirs(f"data/{split}/{model_dir}/{newname}", exist_ok=True)
+                os.makedirs(
+                    f"{output_dir}/data/{split}/{model_dir}/{newname}", exist_ok=True
+                )
 
                 for file in os.listdir(f"{datapath}/{model_dir}/{split}/{subdir}"):
                     try:
                         os.symlink(
                             f"{datapath}/{model_dir}/{split}/{subdir}/{file}",
-                            f"data/{split}/{model_dir}/{newname}/{file}",
+                            f"{output_dir}/data/{split}/{model_dir}/{newname}/{file}",
                         )
                     except FileExistsError:
                         pass
@@ -444,15 +501,19 @@ def download_and_prepare_data(num_train_samples=400, num_test_samples=100):
     logger.info("Joining all real and fake images into 'data_aio'...")
 
     for split in ["train", "val"]:
-        for model_dir in os.listdir(f"data/{split}"):
+        for model_dir in os.listdir(f"{output_dir}/data/{split}"):
             for class_dir in ["0_real", "1_fake"]:
-                os.makedirs(f"data_aio/{split}/{class_dir}", exist_ok=True)
+                os.makedirs(f"{output_dir}/data_aio/{split}/{class_dir}", exist_ok=True)
 
-                for file in os.listdir(f"data/{split}/{model_dir}/{class_dir}"):
+                for file in os.listdir(
+                    f"{output_dir}/data/{split}/{model_dir}/{class_dir}"
+                ):
                     try:
                         os.symlink(
-                            os.readlink(f"data/{split}/{model_dir}/{class_dir}/{file}"),
-                            f"data_aio/{split}/{class_dir}/{model_dir}_{file}",
+                            os.readlink(
+                                f"{output_dir}/data/{split}/{model_dir}/{class_dir}/{file}"
+                            ),
+                            f"{output_dir}/data_aio/{split}/{class_dir}/{model_dir}_{file}",
                         )
                     except FileExistsError:
                         pass
@@ -467,7 +528,7 @@ def download_and_prepare_data(num_train_samples=400, num_test_samples=100):
             for split in ["train", "val"]:
                 for subdir, newname in [("nature", "0_real"), ("ai", "1_fake")]:
                     os.makedirs(
-                        f"data_{num_samples}/{split}/{model_dir}/{newname}",
+                        f"{output_dir}/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{newname}",
                         exist_ok=True,
                     )
 
@@ -482,37 +543,44 @@ def download_and_prepare_data(num_train_samples=400, num_test_samples=100):
                         try:
                             os.symlink(
                                 f"{datapath}/{model_dir}/{split}/{subdir}/{file}",
-                                f"data_{num_samples}/{split}/{model_dir}/{newname}/{file}",
+                                f"{output_dir}/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{newname}/{file}",
                             )
                         except FileExistsError:
                             pass
 
         for split in ["train", "val"]:
-            for model_dir in os.listdir(f"data_{num_samples}/{split}"):
+            for model_dir in os.listdir(
+                f"data_{num_train_samples}_{num_test_samples}/{split}"
+            ):
                 for class_dir in ["0_real", "1_fake"]:
                     os.makedirs(
-                        f"data_aio_{num_samples}/{split}/{class_dir}", exist_ok=True
+                        f"{output_dir}/data_aio_{num_train_samples}_{num_test_samples}/{split}/{class_dir}",
+                        exist_ok=True,
                     )
 
                     for file in os.listdir(
-                        f"data_{num_samples}/{split}/{model_dir}/{class_dir}"
+                        f"{output_dir}/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{class_dir}"
                     ):
                         try:
                             os.symlink(
                                 os.readlink(
-                                    f"data_{num_samples}/{split}/{model_dir}/{class_dir}/{file}"
+                                    f"{output_dir}/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{class_dir}/{file}"
                                 ),
-                                f"data_aio_{num_samples}/{split}/{class_dir}/{model_dir}_{file}",
+                                f"{output_dir}/data_aio_{num_samples}/{split}/{class_dir}/{model_dir}_{file}",
                             )
                         except FileExistsError:
                             pass
 
-    return (
-        "data",
-        (f"data_{num_samples}" if num_samples > 0 else None),
-        "data_aio",
-        (f"data_aio_{num_samples}" if num_samples > 0 else None),
-    )
+    return {
+        "data": "{output_dir}/data",
+        "data_x": f"{output_dir}/data_{num_train_samples}_{num_test_samples}"
+        if num_samples > 0
+        else None,
+        "data_aio": "{output_dir}/data_aio",
+        "data_aio_x": f"{output_dir}/data_aio_{num_train_samples}_{num_test_samples}"
+        if num_samples > 0
+        else None,
+    }
 
 
 def prepare_pipeline(
@@ -553,7 +621,7 @@ def prepare_pipeline(
     )
 
 
-def prepare_dataloader(folder):
+def prepare_dataloader(folder, batch_size=8):
     """Prepares a DataLoader for the specified folder containing images.
     Args:
         folder (str): The path to the folder containing images.
@@ -574,11 +642,27 @@ def prepare_dataloader(folder):
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=8,
+        batch_size=batch_size,
         shuffle=False,
     )
 
     return dataloader
+
+
+def atomic_torch_save(obj, filepath):
+    """Saves a PyTorch object to a file atomically.
+    Args:
+        obj: The PyTorch object to save.
+        filepath (str): The path to the file where the object will be saved.
+    """
+    temp_filepath = f"{filepath}.tmp"
+    torch.save(obj, temp_filepath)
+    os.replace(temp_filepath, filepath)
+
+
+def remove_slash(s):
+    s = s.replace("\\", "/").split("/")
+    return "_".join(s)
 
 
 def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
@@ -587,43 +671,37 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
         pipeline: The pipeline to use for denoising.
         dataloader: The DataLoader containing the images to denoise.
     Returns:
-        tuple: A tuple containing:
-            - all_pred_noises_and_noises (list): List of tuples containing predicted noises and actual noises for each batch.
-            - all_labels (list): List of labels for each batch.
+        str: The path to the output directory where denoised images will be saved.
     """
 
     logger.info("Running pipeline to denoise images...")
 
     dataset_root = dataloader.dataset.root
-    dataset_root = dataset_root.replace("\\", "/").split("/")
-    dataset_root = "_".join(dataset_root)
+    dataset_root = remove_slash(dataset_root)
 
-    denoise_configs = denoise_configs.replace("\\", "/").split("/")
-    denoise_configs = "_".join(denoise_configs)
-
-    all_pred_noises_and_noises = []
-    all_labels = []
+    denoise_configs = remove_slash(denoise_configs)
 
     count_batches = 0
 
-    os.makedirs(f"{output_dir}/cache", exist_ok=True)
+    os.makedirs(f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}", exist_ok=True)
 
     for batch, labels in tqdm(dataloader):
-        if os.path.exists(f"{output_dir}/cache/{dataset_root}_{denoise_configs}_{count_batches}.pt"):
-            pred_noises_list, noises_list = torch.load(f"{output_dir}/cache/{dataset_root}_{denoise_configs}_{count_batches}.pt", weights_only=False)
-        else:
+        if not os.path.exists(
+            f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}/batch_{count_batches}.pt"
+        ):
             pred_noises_list, noises_list = pipeline(batch)
-            torch.save((pred_noises_list, noises_list), f"{output_dir}/cache/{dataset_root}_{denoise_configs}_{count_batches}.pt")
+            atomic_torch_save(
+                (pred_noises_list, noises_list, labels),
+                f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}/batch_{count_batches}.pt",
+            )
 
         count_batches += 1
-        all_pred_noises_and_noises.append((pred_noises_list, noises_list))
-        all_labels.append(labels)
 
-    return all_pred_noises_and_noises, all_labels
+    return f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}"
 
 
 def run_pipeline_extract_features(
-    pipeline: MyPipeline, all_pred_noises_and_noises, included_features
+    pipeline: MyPipeline, denoise_path, included_features
 ):
     """Extracts features from the predicted noises and actual noises using the pipeline.
     Args:
@@ -637,18 +715,25 @@ def run_pipeline_extract_features(
     logger.info("Extracting features from predicted noises and actual noises...")
 
     all_features = []
+    all_labels = []
 
     try:
-        for pred_noises_list, noises_list in all_pred_noises_and_noises:
+        for batch in os.listdir(denoise_path):
+            pred_noises_list, noises_list, labels = torch.load(f"{denoise_path}/{batch}", weights_only=False)
             features = pipeline.extract_features(
                 pred_noises_list, noises_list, included_features
             )
             all_features.extend(features)
+            all_labels.extend(labels.tolist())
+
+            del pred_noises_list, noises_list, labels
+            gc.collect()
+            torch.cuda.empty_cache()
 
     except Exception as e:
         logger.error(f"Error extracting features: {e}")
 
-    return all_features
+    return all_features, all_labels
 
 
 def train_classifier(
@@ -884,18 +969,6 @@ def visualise_tsne_pca(classifier, X, y, batch_size=32, device="cuda"):
     plot_embedding(X_tsne, labels, title="t-SNE Visualization")
 
 
-def get_folder(all_folder, config_mode):
-    match config_mode:
-        case "data":
-            return all_folder[0]
-        case "data_x":
-            return all_folder[1]
-        case "data_aio":
-            return all_folder[2]
-        case "data_aio_x":
-            return all_folder[3]
-
-
 def set_random_seed(seed):
     """Sets the random seed for reproducibility.
     Args:
@@ -907,19 +980,6 @@ def set_random_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def merge_configs(base_config, experiment_config):
-    """Merges the base configuration with the experiment-specific configuration.
-    Args:
-        base_config (dict): The base configuration dictionary.
-        experiment_config (dict): The experiment-specific configuration dictionary.
-    Returns:
-        dict: The merged configuration dictionary.
-    """
-    merged_config = copy.deepcopy(base_config)
-    merged_config.update(experiment_config)
-    return merged_config
 
 
 def normalise_features(features):
@@ -952,7 +1012,7 @@ def get_classifier(
             raise ValueError(f"Unknown classifier type: {classifier_type}")
 
 
-def run_denoise(config, train_dataloader, val_dataloader):
+def run_denoise(config, pipeline, train_dataloader, val_dataloader):
     """Runs the denoising process with the given configuration.
     Args:
         config (dict): A configuration dictionary containing all necessary parameters.
@@ -962,49 +1022,48 @@ def run_denoise(config, train_dataloader, val_dataloader):
     # Set random seeds for reproducibility
     set_random_seed(config["seed"])
 
-    # Initialize pipeline
-    pipeline = prepare_pipeline(
-        hf_repo=config["hf_repo"],
-        total_timesteps=config["timesteps"],
-        diffusion_steps=config["diffusion_steps"],
-        device=config["device"],
+    # Load and preprocess data
+    train_denoise_path = run_pipeline_denoise(
+        pipeline,
+        train_dataloader,
+        config["output_dir"],
+        "_".join(
+            str(config[k]) for k in sorted(list(CONFIG_KEYS_REQUIRE_DENOISE))
+        ),
+    )
+    val_denoise_path = run_pipeline_denoise(
+        pipeline,
+        val_dataloader,
+        config["output_dir"],
+        "_".join(
+            str(config[k]) for k in sorted(list(CONFIG_KEYS_REQUIRE_DENOISE))
+        ),
     )
 
-    # Load and preprocess data
-    train_all_pred_noises_and_noises, train_all_labels = run_pipeline_denoise(
-        pipeline, train_dataloader, config["output_dir"], "_".join(str(config[k]) for k in sorted(list(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)))
-    )
-    val_all_pred_noises_and_noises, val_all_labels = run_pipeline_denoise(
-        pipeline, val_dataloader, config["output_dir"], "_".join(str(config[k]) for k in sorted(list(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)))
-    )
+    gc.collect()
+    torch.cuda.empty_cache()
 
     return (
-        pipeline,
-        train_all_pred_noises_and_noises,
-        train_all_labels,
-        val_all_pred_noises_and_noises,
-        val_all_labels,
+        train_denoise_path,
+        val_denoise_path,
     )
 
 
 def run_extract_features_and_evaluate(
     config,
     pipeline,
-    train_all_pred_noises_and_noises,
-    train_all_labels,
-    val_all_pred_noises_and_noises,
-    val_all_labels,
-    test_all_pred_noises_and_noises=None,
-    test_all_labels=None,
+    train_denoise_path,
+    val_denoise_path,
+    test_denoise_path=None,
 ):
     # Extract features
     included_features = config["included_features"]
 
-    train_features = run_pipeline_extract_features(
-        pipeline, train_all_pred_noises_and_noises, included_features
+    train_features, train_labels = run_pipeline_extract_features(
+        pipeline, train_denoise_path, included_features
     )
     train_features_ts = torch.stack(train_features)
-    train_labels_ts = torch.concat(train_all_labels)
+    train_labels_ts = torch.tensor(train_labels)
 
     train_features_mean = train_features_ts.mean(dim=(0, 1), keepdim=True)
     train_features_std = train_features_ts.std(dim=(0, 1), keepdim=True)
@@ -1012,33 +1071,33 @@ def run_extract_features_and_evaluate(
         train_features_std + 1e-8
     )  # Add small value to avoid division by zero
 
-    val_features = run_pipeline_extract_features(
-        pipeline, val_all_pred_noises_and_noises, included_features
+    val_features, val_labels = run_pipeline_extract_features(
+        pipeline, val_denoise_path, included_features
     )
     val_features_ts = torch.stack(val_features)
     val_features_ts = (val_features_ts - train_features_mean) / (
         train_features_std + 1e-8
     )  # Add small value to avoid division by zero
-    val_labels_ts = torch.concat(val_all_labels)
+    val_labels_ts = torch.tensor(val_labels)
 
-    if test_all_pred_noises_and_noises is not None and test_all_labels is not None:
-        test_features = run_pipeline_extract_features(
-            pipeline, test_all_pred_noises_and_noises, included_features
+    if test_denoise_path is not None:
+        test_features, test_labels = run_pipeline_extract_features(
+            pipeline, test_denoise_path, included_features
         )
         test_features_ts = torch.stack(test_features)
         test_features_ts = (test_features_ts - train_features_mean) / (
             train_features_std + 1e-8
         )  # Add small value to avoid division by zero
-        test_labels_ts = torch.concat(test_all_labels)
+        test_labels_ts = torch.tensor(test_labels)
     else:
         test_features_ts = val_features_ts
         test_labels_ts = val_labels_ts
 
     logger.info(
-        f"Extracted features: train={train_features_ts.shape}, val={val_features_ts.shape}, test={test_features_ts.shape if test_all_pred_noises_and_noises else 'N/A'}"
+        f"Extracted features: train={train_features_ts.shape}, val={val_features_ts.shape}, test={test_features_ts.shape if test_denoise_path else 'N/A'}"
     )
     logger.info(
-        f"Train labels: {train_labels_ts.shape}, Val labels: {val_labels_ts.shape}, Test labels: {test_labels_ts.shape if test_all_pred_noises_and_noises else 'N/A'}"
+        f"Train labels: {train_labels_ts.shape}, Val labels: {val_labels_ts.shape}, Test labels: {test_labels_ts.shape if test_denoise_path else 'N/A'}"
     )
     logger.info(
         f"Train features mean: {train_features_ts.mean().item()}, std: {train_features_ts.std().item()}"
@@ -1094,19 +1153,11 @@ def run_extract_features_and_evaluate(
         )
 
         # Save the trained model
-        model_save_path = f"{config['output_dir']}/model_{config['run_name']}.pt"
+        model_save_path = f"{config['output_dir']}/models/model_{config['run_name']}.pt"
         torch.save(best_model_state_dict, model_save_path)
 
         mlflow.log_artifact(model_save_path, artifact_path="models")
 
-        # Load the best model state
-        # best_classifier = get_classifier(
-        #     classifier_type=config.get("classifier_type", "lstm"),
-        #     input_size=train_features_ts.shape[-1],
-        #     hidden_size=config.get("hidden_size", 64),
-        #     num_layers=config.get("num_layers", 1),
-        #     num_classes=config.get("num_classes", 2)
-        # )
         trained_classifier.load_state_dict(best_model_state_dict)
 
         # Evaluate classifier
@@ -1124,45 +1175,37 @@ def run_extract_features_and_evaluate(
 
         # Save evaluation report
         eval_report_path = (
-            f"{config['output_dir']}/eval_report_{config['run_name']}.json"
+            f"{config['output_dir']}/reports/eval_report_{config['run_name']}.json"
         )
 
         with open(eval_report_path, "w") as f:
             json.dump(eval_report, f)
 
-        mlflow.log_artifact(eval_report_path, artifact_path="eval_reports")
+        mlflow.log_artifact(eval_report_path, artifact_path="reports")
 
     logger.info(
         f"Run '{config['run_name']}' completed. Evaluation report saved to {eval_report_path}"
     )
 
+    gc.collect()
+    torch.cuda.empty_cache()
+
     return eval_report
 
 
-def run_experiment(config):
+def run_experiment(base_config, run_configs):
     """Execute multiple runs with the given configuration.
     Args:
         config (dict): A configuration dictionary containing all necessary parameters.
     """
-    base_config = config["base"]
-    run_configs = config["runs"] or [{}]
-    logger.info(f"Running {len(run_configs)} runs...")
-
-    mlflow.set_experiment(base_config["experiment_name"])
-    mlflow.set_experiment_tag(
-        "mlflow.note.content",
-        f"Executing {len(run_configs)} runs with base config: {base_config}",
-    )
-
-    os.makedirs(base_config["output_dir"], exist_ok=True)
 
     if need_denoise := bool(
-        set(run_configs[0].keys()).intersection(CONFIG_ATTRIBUTES_REQUIRE_DENOISE)
+        set(run_configs[0].keys()).intersection(CONFIG_KEYS_REQUIRE_DENOISE)
     ):
         logger.info("Denoising is required for each run.")
 
-    train_dataloader = prepare_dataloader(f"{base_config['data_dir']}/train")
-    test_dataloader = prepare_dataloader(f"{base_config['data_dir']}/val")
+    train_dataloader = prepare_dataloader(f"{base_config['data_dir']}/train", batch_size=base_config["batch_size"])
+    test_dataloader = prepare_dataloader(f"{base_config['data_dir']}/val", batch_size=base_config["batch_size"])
 
     reports = []
 
@@ -1171,60 +1214,59 @@ def run_experiment(config):
             # Merge base config with run-specific config
             merged_config = merge_configs(base_config, run_config)
 
-            pipeline_and_data = run_denoise(
-                merged_config, train_dataloader, test_dataloader
+            # Set random seeds for reproducibility
+            set_random_seed(merged_config["seed"])
+
+            # Initialize pipeline
+            pipeline = prepare_pipeline(
+                hf_repo=merged_config["hf_repo"],
+                total_timesteps=merged_config["timesteps"],
+                diffusion_steps=merged_config["diffusion_steps"],
+                device=merged_config["device"],
+            )
+
+            denoise_paths = run_denoise(
+                merged_config, pipeline, train_dataloader, test_dataloader
             )
             eval_report = run_extract_features_and_evaluate(
-                merged_config, *pipeline_and_data
+                merged_config, pipeline, *denoise_paths
             )
             reports.append(eval_report)
 
     else:
-        pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
+
+        # Set random seeds for reproducibility
+        set_random_seed(base_config["seed"])
+
+        # Initialize pipeline
+        pipeline = prepare_pipeline(
+            hf_repo=base_config["hf_repo"],
+            total_timesteps=base_config["timesteps"],
+            diffusion_steps=base_config["diffusion_steps"],
+            device=base_config["device"],
+        )
+
+        denoise_paths = run_denoise(base_config, pipeline, train_dataloader, test_dataloader)
 
         for run_config in run_configs:
             # Merge base config with run-specific config
             merged_config = merge_configs(base_config, run_config)
 
             eval_report = run_extract_features_and_evaluate(
-                merged_config, *pipeline_and_data
+                merged_config, pipeline, *denoise_paths
             )
             reports.append(eval_report)
 
-    reports_df = pd.DataFrame(reports)
-    reports_df.to_csv(f"{base_config['output_dir']}/eval_reports.csv", index=False)
-
-    with mlflow.start_run(run_name=f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
-        mlflow.log_params(base_config)
-        mlflow.log_artifact(
-            f"{base_config['output_dir']}/eval_reports.csv",
-            artifact_path="eval_reports",
-        )
-
-    logger.info(
-        f"All runs completed. Evaluation reports saved to {base_config['output_dir']}/eval_reports.csv"
-    )
-    logger.info(f"Evaluation reports:\n{reports_df}")
+    return reports
 
 
-def run_generalisation_experiment(config):
+def run_generalisation_experiment(base_config, run_configs):
     """Runs a generalisation experiment with the given configuration.
     Args:
         config (dict): A configuration dictionary containing all necessary parameters.
     """
-    base_config = config["base"]
+
     model_dirs = os.listdir(f"{base_config['data_dir']}/train")
-    os.makedirs(base_config["output_dir"], exist_ok=True)
-
-    mlflow.set_experiment(base_config["experiment_name"])
-    mlflow.set_experiment_tag(
-        "mlflow.note.content",
-        f"Running generalisation experiment with {len(model_dirs)} model directories.",
-    )
-
-    logger.info(
-        f"Initial CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}"
-    )
 
     train_dataloaders = {
         model_dir: prepare_dataloader(f"{base_config['data_dir']}/train/{model_dir}")
@@ -1239,52 +1281,37 @@ def run_generalisation_experiment(config):
         f"Running generalisation experiment with {len(model_dirs)} model directories..."
     )
 
+    # Set random seeds for reproducibility
+    set_random_seed(base_config["seed"])
+
+    # Initialize pipeline
+    pipeline = prepare_pipeline(
+        hf_repo=base_config["hf_repo"],
+        total_timesteps=base_config["timesteps"],
+        diffusion_steps=base_config["diffusion_steps"],
+        device=base_config["device"],
+    )
+
+    model_denoise_paths = {}
+
     for model_dir, (train_dataloader, test_dataloader) in zip(
         model_dirs, zip(train_dataloaders.values(), test_dataloaders.values())
     ):
-        if os.path.exists(
-            f"{base_config['output_dir']}_denoised_data/pipeline_and_data_{model_dir}.pt"
-        ):
-            logger.info(
-                f"Pipeline and data for model directory {model_dir} already exists. Skipping..."
-            )
-            continue
 
-        pipeline_and_data = run_denoise(base_config, train_dataloader, test_dataloader)
-        torch.save(
-            pipeline_and_data,
-            f"{base_config['output_dir']}_denoised_data/pipeline_and_data_{model_dir}.pt",
-        )
-        del pipeline_and_data  # Free memory
-        gc.collect()
-        torch.cuda.empty_cache()
-        logger.info(
-            f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}"
-        )
+        denoise_paths = run_denoise(base_config, pipeline, train_dataloader, test_dataloader)
+
+        model_denoise_paths[model_dir] = denoise_paths
 
     reports = []
     logger.info("Starting generalisation experiments...")
 
     for this_model_dir in model_dirs:  # pnd is pipeline_and_data
-        for (
-            that_model_dir
-        ) in model_dirs:  # inner loop to iterate over each model directory
+        for that_model_dir in model_dirs:  # inner loop to iterate over each model directory
             (
-                this_pipeline,
-                this_train_all_pred_noises_and_noises,
-                this_train_all_labels,
-                this_val_all_pred_noises_and_noises,
-                this_val_all_labels,
-            ) = torch.load(
-                f"{base_config['output_dir']}_denoised_data/pipeline_and_data_{this_model_dir}.pt",
-                weights_only=False,
-            )
-            _, _, _, that_val_all_pred_noises_and_noises, that_val_all_labels = (
-                torch.load(
-                    f"{base_config['output_dir']}_denoised_data/pipeline_and_data_{that_model_dir}.pt",
-                    weights_only=False,
-                )
-            )
+                this_train_denoise_path,
+                this_val_denoise_path,
+            ) = model_denoise_paths[this_model_dir]
+            _, that_val_denoise_path = model_denoise_paths[that_model_dir]
 
             base_config["run_name"] = (
                 f"generalisation_{this_model_dir}_to_{that_model_dir}"
@@ -1297,13 +1324,10 @@ def run_generalisation_experiment(config):
             # Train classifier on this model's training data and evaluate on that model's validation data
             eval_report = run_extract_features_and_evaluate(
                 base_config,
-                this_pipeline,
-                this_train_all_pred_noises_and_noises,
-                this_train_all_labels,
-                this_val_all_pred_noises_and_noises,
-                this_val_all_labels,
-                that_val_all_pred_noises_and_noises,
-                that_val_all_labels,
+                pipeline,
+                this_train_denoise_path,
+                this_val_denoise_path,
+                that_val_denoise_path,
             )
 
             eval_report["original_model"] = this_model_dir
@@ -1311,119 +1335,213 @@ def run_generalisation_experiment(config):
 
             reports.append(eval_report)
 
-            del (
-                this_pipeline,
-                this_train_all_pred_noises_and_noises,
-                this_train_all_labels,
-                this_val_all_pred_noises_and_noises,
-                this_val_all_labels,
-            )
-            del that_val_all_pred_noises_and_noises, that_val_all_labels
-            gc.collect()
-            torch.cuda.empty_cache()
-            logger.info(
-                f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}"
-            )
-
-    reports_df = pd.DataFrame(reports)
-    reports_df.to_csv(f"{base_config['output_dir']}/eval_reports.csv", index=False)
-
-    with mlflow.start_run(run_name=f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
-        mlflow.log_params(base_config)
-        mlflow.log_artifact(
-            f"{base_config['output_dir']}/eval_reports.csv",
-            artifact_path="eval_reports",
-        )
-
-    logger.info(
-        f"Generalisation experiments completed. Evaluation reports saved to {base_config['output_dir']}/eval_reports.csv"
-    )
-
-
-def normalise_config(config, datadirs):
-    """Normalises the configuration dictionary.
-    Args:
-        config (dict): The configuration dictionary to normalise.
-    Returns:
-        dict: The normalised configuration dictionary.
-    """
-    if "data_dir" in config["base"]:
-        config["base"]["data_dir"] = get_folder(datadirs, config["base"]["data_dir"])
-
-    if IS_ON_GOOGLE_COLAB and "output_dir" in config["base"]:
-        config["base"]["output_dir"] = (
-            f"/content/drive/MyDrive/mypipeline_exps_3/{config['base']['output_dir']}"
-        )
-
-    if not torch.cuda.is_available():
-        config["base"]["device"] = "cpu"
-
-    return config
+    return reports
 
 
 try:
     from google.colab import drive  # type:ignore
 
     drive.mount("/content/drive")
-    prefix = "/content/drive/MyDrive/mypipeline_exps_confs/"
+    output_prefix = "/content/drive/MyDrive/mypipeline_exps_3/"
     IS_ON_GOOGLE_COLAB = True
 except ImportError:
+    output_prefix = ""
     IS_ON_GOOGLE_COLAB = False
-    prefix = ""
 
-if __name__ == "__main__":
-    try:
-        datadirs = download_and_prepare_data(num_train_samples=100, num_test_samples=50)
 
-        with open(f"{prefix}default.yaml", "r") as f:
-            default_config = yaml.safe_load(f)
-            default_config = normalise_config(default_config, datadirs)
+def merge_configs(base_config, experiment_config):
+    """Merges the base configuration with the experiment-specific configuration.
+    Args:
+        base_config (dict): The base configuration dictionary.
+        experiment_config (dict): The experiment-specific configuration dictionary.
+    Returns:
+        dict: The merged configuration dictionary.
+    """
+    merged_config = copy.deepcopy(base_config)
+    merged_config.update(experiment_config)
+    return merged_config
 
-        with open(f"{prefix}exps/generalisation/generalisation_exp.yaml", "r") as f:
-            generalisation_config = yaml.safe_load(f)
-            generalisation_config = normalise_config(generalisation_config, datadirs)
-            generalisation_config = merge_configs(default_config, generalisation_config)
 
-        with open(f"{prefix}exps/others/full_dataset_exp.yaml", "r") as f:
-            full_dataset_config = yaml.safe_load(f)
-            full_dataset_config = normalise_config(full_dataset_config, datadirs)
-            full_dataset_config = merge_configs(default_config, full_dataset_config)
+def normalise_config(config):
+    """Normalises the configuration dictionary.
+    Args:
+        config (dict): The configuration dictionary to normalise.
+    Returns:
+        dict: The normalised configuration dictionary.
+    """
 
-        # other_configs = []
-        # for exp_file in os.listdir(f"{prefix}exps/others"):
-        #     with open(f"{prefix}exps/others/{exp_file}", "r") as f:
-        #         exp_config = yaml.safe_load(f)
-        #         exp_config = normalise_config(exp_config, datadirs)
-        #         other_configs.append(merge_configs(default_config, exp_config))
+    def normalise_run_config(run_config):
+        if IS_ON_GOOGLE_COLAB and "output_dir" in run_config:
+            run_config["output_dir"] = f"{output_prefix}{run_config['output_dir']}"
 
-        # logger.info(
-        #     f"Loaded 1 generalisation experiment configuration and {len(other_configs)} other experiment configurations."
-        # )
+        if not torch.cuda.is_available():
+            run_config["device"] = "cpu"
 
-        # for config in other_configs:
-        #     logger.info(f"Running experiment with config: {config['base']['experiment_name']}")
-        #     run_experiments(config)
+        return run_config
 
-        logger.info("Running one full dataset experiment...")
-        run_experiment(full_dataset_config)
+    config["base"] = normalise_run_config(config["base"])
 
-        gc.collect()
-        torch.cuda.empty_cache()
-        logger.info(
-            f"CUDA allocated memory: {torch.cuda.memory_allocated()}, CUDA reserved memory: {torch.cuda.memory_reserved()}"
+    for i, run_config in enumerate(config["runs"]):
+        config["runs"][i] = normalise_run_config(run_config)
+
+    return config
+
+
+def validate_config(config):
+    """Validates the configuration dictionary for required keys.
+    Args:
+        config (dict): The configuration dictionary to validate.
+    Raises:
+        ValueError: If any required key is missing in the configuration.
+    """
+    if not isinstance(config, dict):
+        raise ValueError("Configuration must be a dictionary.")
+
+    if not set(config.keys()) == CONFIG_REQUIRED_KEYS:
+        raise ValueError(
+            f"Configuration must contain keys {CONFIG_REQUIRED_KEYS}. Found: {set(config.keys())}"
         )
 
-        logger.info("Running generalisation experiment...")
-        run_generalisation_experiment(generalisation_config)
+    if not (
+        isinstance(config["base"], dict)
+        and isinstance(config["runs"], list)
+        and all(isinstance(run, dict) for run in config["runs"])
+    ):
+        raise ValueError(
+            "Configuration 'base' must be a dictionary and 'runs' must be a list of dictionaries."
+    )
+
+    if config["type"] not in CONFIG_ALLOWED_TYPE:
+        raise ValueError(
+            f"Configuration 'type' must be one of {CONFIG_ALLOWED_TYPE}. Found: {config['type']}"
+        )
+
+    if config["data_dir"] not in CONFIG_ALLOWED_DATA_DIR:
+        raise ValueError(
+            f"Configuration 'data_dir' must be one of {CONFIG_ALLOWED_DATA_DIR}. Found: {config['data_dir']}"
+        )
+
+    def validate_run_config(run_config):
+        """Validates a single run configuration."""
+        if not set(run_config.keys()).issubset(CONFIG_RUN_REQUIRED_KEYS):
+            raise ValueError(
+                f"Run configuration must contain only allowed keys: {CONFIG_RUN_REQUIRED_KEYS}. "
+                f"Found unrecognized keys: {set(run_config.keys()) - CONFIG_RUN_REQUIRED_KEYS}"
+            )
+
+        if "classifier_type" in run_config and run_config["classifier_type"] not in CONFIG_ALLOWED_CLASSIFIER_TYPE:
+            raise ValueError(
+                f"Configuration 'classifier_type' must be one of {CONFIG_ALLOWED_CLASSIFIER_TYPE}. "
+                f"Found: {run_config['classifier_type']}"
+            )
+
+        if "device" in run_config and run_config["device"] not in CONFIG_ALLOWED_DEVICE:
+            raise ValueError(
+                f"Configuration 'device' must be one of {CONFIG_ALLOWED_DEVICE}. "
+                f"Found: {run_config['device']}"
+            )
+
+        if "included_features" in run_config and set(run_config["included_features"]).issubset(CONFIG_ALLOWED_FEATURES):
+            raise ValueError(
+                f"Configuration 'included_features' must be a subset of {CONFIG_ALLOWED_FEATURES}. "
+                f"Found: {set(run_config["included_features"]).intersection(CONFIG_ALLOWED_FEATURES)}"
+            )
+
+    validate_run_config(config["base"])
+
+    for i, run_config in enumerate(config["runs"]):
+        try:
+            validate_run_config(run_config)
+        except ValueError as e:
+            raise ValueError(f"{e} at run {i}")
+
+
+def main(config_path):
+    """Main function to run an experiment.
+    Args:
+        config (dict): A configuration dictionary containing all necessary parameters.
+    """
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    validate_config(config)
+
+    config = normalise_config(config)
+
+    mlflow.set_experiment(config["experiment_name"])
+
+    logger.info(f"Executing config: {pformat(config, sort_dicts=False)}")
+
+    os.makedirs(config["output_dir"], exist_ok=True)
+
+    datadir_map = download_and_prepare_data(
+        output_dir=config["output_dir"],
+        num_train_samples=config["x_train_samples"],
+        num_test_samples=config["x_test_samples"],
+    )
+
+    base_config = config["base"]
+    run_configs = config["runs"] or [{}]
+    base_config["data_dir"] = datadir_map[config["data_dir"]]
+    base_config["output_dir"] = base_config['output_dir']
+
+    try:
+
+        # Run experiment
+        if config["type"] == "generic":
+            reports = run_experiment(
+                base_config,
+                run_configs
+            )
+        elif config["type"] == "generalisation":
+            reports = run_generalisation_experiment(
+                base_config,
+                run_configs
+            )
+        else:
+            reports = []
+
+        reports_df = pd.DataFrame(reports)
+        reports_df.to_csv(f"{base_config['output_dir']}/eval_reports.csv", index=False)
+
+        with mlflow.start_run(
+            run_name=f"reporting_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        ):
+            mlflow.log_params(base_config)
+            mlflow.log_artifact(
+                f"{base_config['output_dir']}/eval_reports.csv",
+                artifact_path="reports",
+            )
+
+        logger.info(
+            f"Experiment {base_config['experiment_name']} completed. Evaluation reports saved to {base_config['output_dir']}/eval_reports.csv"
+        )
+        logger.info(f"Evaluation reports:\n{reports_df}")
 
     except Exception as e:
-        logger.error(f"An error occurred: {e}")
-        raise e
+        logger.error(f"An error has occurred: {e}", exc_info=True)
 
     finally:
         gc.collect()
         torch.cuda.empty_cache()
 
-        mlflow.set_experiment("logs")
         with mlflow.start_run(run_name=f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
             mlflow.log_artifact("mypipeline.log")
+
+
+if __name__ == "__main__":
+
+    parser = ArgumentParser(prog="MyPipeline Experiment")
+    parser.add_argument('config')
+
+    args = parser.parse_args()
+
+    main(args.config)
+
+    # Quick code for running on Google Colab
+
+    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp.yaml")
+
+    # for exp_file in os.listdir("/content/drive/MyDrive/mypipeline_exps_confs/exps/others"):
+    #     main(f"/content/drive/MyDrive/mypipeline_exps_confs/exps/others/{exp_file}")
+
