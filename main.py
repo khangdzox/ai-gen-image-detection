@@ -518,10 +518,10 @@ def download_and_prepare_data(output_dir="", num_train_samples=-1, num_test_samp
 
     # Symlinks data to a new structure
     logger.info(
-        f"Symlinks data to a new structure at {output_dir}/dataset/{data_dir_name}/..."
+        f"Symlinks data to a new structure at {output_dir / 'dataset' / data_dir_name}..."
     )
 
-    for model_dir in datapath.iterdir():
+    for model_dir in os.listdir(datapath):
         for split in ["train", "val"]:
             for subdir, class_dir in [("nature", "0_real"), ("ai", "1_fake")]:
                 (
@@ -552,24 +552,24 @@ def download_and_prepare_data(output_dir="", num_train_samples=-1, num_test_samp
 
     # Join all real images and fake images into 'data_aio'
     logger.info(
-        f"Joining all real and fake images of all models into 2 classes at {output_dir}/dataset/{data_aio_dir_name}..."
+        f"Joining all real and fake images of all models into 2 classes at {output_dir / 'dataset' / data_aio_dir_name}..."
     )
 
     for split in ["train", "val"]:
-        for model_dir in (output_dir / "dataset" / data_dir_name / split).iterdir():
+        for model_dir in os.listdir(output_dir / "dataset" / data_dir_name / split):
             for class_dir in ["0_real", "1_fake"]:
                 (output_dir / "dataset" / data_aio_dir_name / split / class_dir).mkdir(
                     parents=True, exist_ok=True
                 )
 
-                for file in (
+                for file in os.listdir(
                     output_dir
                     / "dataset"
                     / data_dir_name
                     / split
                     / model_dir
                     / class_dir
-                ).iterdir():
+                ):
                     try:
                         (
                             output_dir
