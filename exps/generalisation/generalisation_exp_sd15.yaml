@@ -2,8 +2,8 @@ experiment_name: generalisation_experiment_sd15
 type: generalisation
 data_dir: data
 output_dir: generalisation_experiment_sd15
-x_train_samples: 400
-x_test_samples: 100
+x_train_samples: -1
+x_test_samples: -1
 
 base:
   seed: 42

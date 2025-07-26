@@ -2,8 +2,8 @@ experiment_name: full_dataset_exp
 type: generic
 data_dir: data_aio
 output_dir: full_dataset_exp
-x_train_samples: -1
-x_test_samples: -1
+x_train_samples: 400
+x_test_samples: 100
 
 base:
   seed: 42

@@ -2,8 +2,8 @@ experiment_name: features_20_40_exp
 type: generic
 data_dir: data_aio
 output_dir: features_20_40_exp
-x_train_samples: 400
-x_test_samples: 100
+x_train_samples: -1
+x_test_samples: -1
 
 base:
   seed: 42

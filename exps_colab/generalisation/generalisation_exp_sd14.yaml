@@ -1,14 +1,14 @@
-experiment_name: generalisation_experiment_sd21
+experiment_name: generalisation_experiment_sd14
 type: generalisation
 data_dir: data
-output_dir: generalisation_experiment_sd21
-x_train_samples: -1
-x_test_samples: -1
+output_dir: generalisation_experiment_sd14
+x_train_samples: 400
+x_test_samples: 100
 
 base:
   seed: 42
 
-  hf_repo: stabilityai/stable-diffusion-2-1
+  hf_repo: CompVis/stable-diffusion-v1-4
   timesteps: 30
   diffusion_steps: 20
   device: cuda

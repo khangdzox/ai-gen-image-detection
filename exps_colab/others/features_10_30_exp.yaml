@@ -1,15 +1,15 @@
-experiment_name: features_10_20_exp
+experiment_name: features_10_30_exp
 type: generic
 data_dir: data_aio
-output_dir: features_10_20_exp
-x_train_samples: -1
-x_test_samples: -1
+output_dir: features_10_30_exp
+x_train_samples: 400
+x_test_samples: 100
 
 base:
   seed: 42
 
   hf_repo: CompVis/stable-diffusion-v1-4
-  timesteps: 20
+  timesteps: 30
   diffusion_steps: 10
   device: cuda
 
