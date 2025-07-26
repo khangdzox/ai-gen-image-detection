@@ -34,6 +34,11 @@ pip install torch==2.6.0 torchvision>=0.21.0 --index-url https://download.pytorc
 
 ## Usage
 
+Test connection to MLFlow with the mlflow_test.py file:
+```bash
+python mlflow_test.py
+```
+
 Run the pipeline using the following command:
 
 ```bash
