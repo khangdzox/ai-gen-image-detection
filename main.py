@@ -1384,6 +1384,9 @@ def normalise_config(config):
     if IS_ON_GOOGLE_COLAB and "output_dir" in config:
         config["output_dir"] = f"{output_prefix}{config['output_dir']}"
 
+    if IS_ON_GOOGLE_COLAB and "experiment_name" in config:
+        config["experiment_name"] = f"{config['experiment_name']}_colab"
+
     def normalise_run_config(run_config):
         if not torch.cuda.is_available():
             run_config["device"] = "cpu"
@@ -1491,11 +1494,18 @@ def main(config_path):
 
     os.makedirs(config["output_dir"], exist_ok=True)
 
-    datadir_map = download_and_prepare_data(
-        output_dir=config["output_dir"],
-        num_train_samples=config["x_train_samples"],
-        num_test_samples=config["x_test_samples"],
-    )
+    if IS_ON_GOOGLE_COLAB:
+        datadir_map = download_and_prepare_data(
+            output_dir=".",
+            num_train_samples=400,
+            num_test_samples=100,
+        )
+    else:
+        datadir_map = download_and_prepare_data(
+            output_dir=config["output_dir"],
+            num_train_samples=config["x_train_samples"],
+            num_test_samples=config["x_test_samples"],
+        )
 
     base_config = config["base"]
     run_configs = config["runs"] or [{}]
@@ -1549,7 +1559,7 @@ try:
     from google.colab import drive  # type:ignore
 
     drive.mount("/content/drive")
-    output_prefix = "/content/drive/MyDrive/mypipeline_exps_5_1/"
+    output_prefix = "/content/drive/MyDrive/mypipeline_exps_6/"
     IS_ON_GOOGLE_COLAB = True
 except ImportError:
     output_prefix = ""
@@ -1572,3 +1582,5 @@ if __name__ == "__main__":
     #     main(f"/content/drive/MyDrive/mypipeline_exps_confs/exps/others/{exp_file}")
 
     # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/others/full_dataset_exp_colab.yaml")
+    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp_sd15.yaml")
+    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp_sd21.yaml")
