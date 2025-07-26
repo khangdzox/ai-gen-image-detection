@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+from pathlib import Path
 from pprint import pformat
 from datetime import datetime
 
@@ -483,115 +484,117 @@ class TransformerClassifier(torch.nn.Module):
         return x
 
 
-def download_and_prepare_data(
-    output_dir="", num_train_samples=400, num_test_samples=100
-):
+def download_and_prepare_data(output_dir="", num_train_samples=-1, num_test_samples=-1):
     # Download the dataset from Kaggle
     logger.info("Downloading dataset from Kaggle...")
     datapath = kagglehub.dataset_download("yangsangtai/tiny-genimage")
 
+    datapath = Path(datapath)
+    output_dir = Path(output_dir)
+
+    issubset = num_train_samples > 0 and num_test_samples > 0
+
+    def get_random_or_all_files(path, num_samples):
+        if issubset:
+            random.seed(42)
+            return random.sample(
+                os.listdir(path),
+                num_samples,
+            )
+        else:
+            return os.listdir(path)
+
+    if issubset:
+        logger.info(
+            f"Creating a subset of the dataset with {num_train_samples} train samples "
+            f"and {num_test_samples} test samples for each class..."
+        )
+        data_dir_name = f"data_{num_train_samples}_{num_test_samples}"
+        data_aio_dir_name = f"data_aio_{num_train_samples}_{num_test_samples}"
+    else:
+        logger.info("Using the full dataset without subset...")
+        data_dir_name = "data"
+        data_aio_dir_name = "data_aio"
+
     # Symlinks data to a new structure
-    logger.info("Symlinks data to a new structure at 'data/train' and 'data/val'...")
+    logger.info(
+        f"Symlinks data to a new structure at {output_dir}/dataset/{data_dir_name}/..."
+    )
 
-    for model_dir in os.listdir(datapath):
+    for model_dir in datapath.iterdir():
         for split in ["train", "val"]:
-            for subdir, newname in [("nature", "0_real"), ("ai", "1_fake")]:
-                os.makedirs(
-                    f"{output_dir}/dataset/data/{split}/{model_dir}/{newname}", exist_ok=True
-                )
+            for subdir, class_dir in [("nature", "0_real"), ("ai", "1_fake")]:
+                (
+                    output_dir
+                    / "dataset"
+                    / data_dir_name
+                    / split
+                    / model_dir
+                    / class_dir
+                ).mkdir(parents=True, exist_ok=True)
 
-                for file in os.listdir(f"{datapath}/{model_dir}/{split}/{subdir}"):
+                for file in get_random_or_all_files(
+                    datapath / model_dir / split / subdir,
+                    num_train_samples if split == "train" else num_test_samples,
+                ):
                     try:
-                        os.symlink(
-                            f"{datapath}/{model_dir}/{split}/{subdir}/{file}",
-                            f"{output_dir}/dataset/data/{split}/{model_dir}/{newname}/{file}",
-                        )
+                        (
+                            output_dir
+                            / "dataset"
+                            / data_dir_name
+                            / split
+                            / model_dir
+                            / class_dir
+                            / file
+                        ).symlink_to(datapath / model_dir / split / subdir / file)
                     except FileExistsError:
                         pass
 
     # Join all real images and fake images into 'data_aio'
-    logger.info("Joining all real and fake images into 'data_aio'...")
+    logger.info(
+        f"Joining all real and fake images of all models into 2 classes at {output_dir}/dataset/{data_aio_dir_name}..."
+    )
 
     for split in ["train", "val"]:
-        for model_dir in os.listdir(f"{output_dir}/dataset/data/{split}"):
+        for model_dir in (output_dir / "dataset" / data_dir_name / split).iterdir():
             for class_dir in ["0_real", "1_fake"]:
-                os.makedirs(f"{output_dir}/dataset/data_aio/{split}/{class_dir}", exist_ok=True)
+                (output_dir / "dataset" / data_aio_dir_name / split / class_dir).mkdir(
+                    parents=True, exist_ok=True
+                )
 
-                for file in os.listdir(
-                    f"{output_dir}/dataset/data/{split}/{model_dir}/{class_dir}"
-                ):
+                for file in (
+                    output_dir
+                    / "dataset"
+                    / data_dir_name
+                    / split
+                    / model_dir
+                    / class_dir
+                ).iterdir():
                     try:
-                        os.symlink(
-                            os.readlink(
-                                f"{output_dir}/dataset/data/{split}/{model_dir}/{class_dir}/{file}"
-                            ),
-                            f"{output_dir}/dataset/data_aio/{split}/{class_dir}/{model_dir}_{file}",
+                        (
+                            output_dir
+                            / "dataset"
+                            / data_aio_dir_name
+                            / split
+                            / class_dir
+                            / f"{model_dir}_{file}"
+                        ).symlink_to(
+                            (
+                                output_dir
+                                / "dataset"
+                                / data_dir_name
+                                / split
+                                / model_dir
+                                / class_dir
+                                / file
+                            ).readlink()
                         )
                     except FileExistsError:
                         pass
 
-    # Create a smaller dataset with a specified number of samples
-    num_samples = (num_train_samples + num_test_samples) * len(os.listdir(datapath))
-
-    logger.info(f"Creating a smaller dataset with {num_samples} samples...")
-
-    if num_samples > 0:
-        for model_dir in os.listdir(datapath):
-            for split in ["train", "val"]:
-                for subdir, newname in [("nature", "0_real"), ("ai", "1_fake")]:
-                    os.makedirs(
-                        f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{newname}",
-                        exist_ok=True,
-                    )
-
-                    random.seed(42)  # For reproducibility
-                    random_files = random.sample(
-                        os.listdir(f"{datapath}/{model_dir}/{split}/{subdir}"),
-                        (num_train_samples if split == "train" else num_test_samples)
-                        // 2,
-                    )
-
-                    for file in random_files:
-                        try:
-                            os.symlink(
-                                f"{datapath}/{model_dir}/{split}/{subdir}/{file}",
-                                f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{newname}/{file}",
-                            )
-                        except FileExistsError:
-                            pass
-
-        for split in ["train", "val"]:
-            for model_dir in os.listdir(
-                f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}"
-            ):
-                for class_dir in ["0_real", "1_fake"]:
-                    os.makedirs(
-                        f"{output_dir}/dataset/data_aio_{num_train_samples}_{num_test_samples}/{split}/{class_dir}",
-                        exist_ok=True,
-                    )
-
-                    for file in os.listdir(
-                        f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{class_dir}"
-                    ):
-                        try:
-                            os.symlink(
-                                os.readlink(
-                                    f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}/{split}/{model_dir}/{class_dir}/{file}"
-                                ),
-                                f"{output_dir}/dataset/data_aio_{num_train_samples}_{num_test_samples}/{split}/{class_dir}/{model_dir}_{file}",
-                            )
-                        except FileExistsError:
-                            pass
-
     return {
-        "data": "{output_dir}/dataset/data",
-        "data_x": f"{output_dir}/dataset/data_{num_train_samples}_{num_test_samples}"
-        if num_samples > 0
-        else None,
-        "data_aio": "{output_dir}/dataset/data_aio",
-        "data_aio_x": f"{output_dir}/dataset/data_aio_{num_train_samples}_{num_test_samples}"
-        if num_samples > 0
-        else None,
+        "data": str(output_dir / "dataset" / data_dir_name),
+        "data_aio": str(output_dir / "dataset" / data_aio_dir_name),
     }
 
 
@@ -699,7 +702,9 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
         f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}", exist_ok=True
     )
 
-    logger.info(f"Looking for and storing denoised data in {output_dir}/denoise_cache/{dataset_root}_{denoise_configs}")
+    logger.info(
+        f"Looking for and storing denoised data in {output_dir}/denoise_cache/{dataset_root}_{denoise_configs}"
+    )
 
     for batch, labels in tqdm(dataloader):
         if not os.path.exists(
@@ -1145,7 +1150,8 @@ def run_extract_features_and_evaluate(
                 "diffusion_steps": config["diffusion_steps"],
                 "hidden_size": config["hidden_size"],
                 "num_layers": config["num_layers"],
-                "batch_size": config["batch_size"] * 2,  # Adjusted for larger batch size
+                # Adjusted for larger batch size
+                "batch_size": config["batch_size"] * 2,
                 "epochs": config["epochs"],
                 "learning_rate": config["lr"],
                 "weight_decay": config["weight_decay"],
