@@ -417,6 +417,22 @@ class LSTMClassifier(torch.nn.Module):
         self.dropout = torch.nn.Dropout(0.2)
         self.fc = torch.nn.Linear(hidden_size, num_classes)
 
+        self.__init_weights()
+
+    def __init_weights(self):
+        for name, param in self.lstm.named_parameters():
+            if "weight_ih" in name:
+                torch.nn.init.xavier_uniform_(param)
+            elif "weight_hh" in name:
+                torch.nn.init.orthogonal_(param)
+            elif "bias_ih" in name or "bias_hh" in name:
+                torch.nn.init.zeros_(param)
+                hidden_size = param.size(0) // 4
+                param.data[hidden_size:2 * hidden_size] = 1.0
+
+        torch.nn.init.xavier_uniform_(self.fc.weight)
+        torch.nn.init.zeros_(self.fc.bias)
+
     def forward(self, x):
         x, _ = self.lstm(x)
         x = x[:, -1, :]
@@ -443,6 +459,20 @@ class GRUClassifier(torch.nn.Module):
         self.dropout = torch.nn.Dropout(0.2)
         self.fc = torch.nn.Linear(hidden_size, num_classes)
 
+        self.__init_weights()
+
+    def __init_weights(self):
+        for name, param in self.gru.named_parameters():
+            if "weight_ih" in name:
+                torch.nn.init.xavier_uniform_(param)
+            elif "weight_hh" in name:
+                torch.nn.init.orthogonal_(param)
+            elif "bias_ih" in name or "bias_hh" in name:
+                torch.nn.init.zeros_(param)
+
+        torch.nn.init.xavier_uniform_(self.fc.weight)
+        torch.nn.init.zeros_(self.fc.bias)
+
     def forward(self, x):
         x, _ = self.gru(x)
         x = x[:, -1, :]
@@ -468,6 +498,21 @@ class TransformerClassifier(torch.nn.Module):
         )
         self.dropout = torch.nn.Dropout(0.2)
         self.fc = torch.nn.Linear(hidden_size, num_classes)
+
+        self.__init_weights()
+
+    def __init_weights(self):
+        for _, module in self.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+            elif isinstance(module, torch.nn.LayerNorm):
+                torch.nn.init.ones_(module.weight)
+                torch.nn.init.zeros_(module.bias)
+
+        torch.nn.init.xavier_uniform_(self.fc.weight)
+        torch.nn.init.zeros_(self.fc.bias)
 
     def forward(self, x):
         x = self.projector(x)
@@ -755,6 +800,7 @@ def run_pipeline_extract_features(
 
     except Exception as e:
         logger.error(f"Error extracting features: {e}")
+        raise e
 
     return all_features, all_labels
 
@@ -792,19 +838,23 @@ def train_classifier(
     logger.info(
         f"Training classifier with batch_size={batch_size}, epochs={epochs}, lr={lr}, weight_decay={weight_decay}, device={device}"
     )
+    logger.info(
+        f"Early stopping patience set to {EARLY_STOPPING_PATIENCE} epochs"
+    )
 
     classifier.to(device)
 
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         classifier.parameters(), lr=lr, weight_decay=weight_decay
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-5, cooldown=3
+        optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-7, cooldown=3
     )
     criterion = torch.nn.CrossEntropyLoss()
 
     best_model_state_dict = None
     best_eval_loss = float("inf")
+    best_epoch = 0
 
     for epoch in range(epochs):
         classifier.train()
@@ -823,6 +873,7 @@ def train_classifier(
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(classifier.parameters(), max_norm=1.0)
             optimizer.step()
 
             running_loss += loss.item() * batch.size(0)
@@ -857,6 +908,7 @@ def train_classifier(
             best_eval_loss = val_running_loss / val_total
             best_model_state_dict = copy.deepcopy(classifier.state_dict().copy())
             is_best = True
+            best_epoch = epoch
 
         logger.info(
             f"Epoch {epoch + 1:>2}: Loss = {running_loss / total:.6f}, Accuracy = {correct / total:.6f}, Val Loss = {val_running_loss / val_total:.6f}, Val Accuracy = {val_correct / val_total:.6f}, LR = {scheduler.get_last_lr()[0]:e}{', New best' if is_best else ''}"
@@ -871,6 +923,12 @@ def train_classifier(
             },
             step=epoch + 1,
         )
+
+        if epoch - best_epoch > early_stopping_patience:
+            logger.info(
+                f"Early stopping triggered at epoch {epoch + 1}, no improvement in validation loss for {early_stopping_patience} epochs."
+            )
+            break
 
     assert best_model_state_dict is not None, (
         "Training failed, either epochs == 0 or data is empty. No model was trained."
@@ -1022,6 +1080,8 @@ def normalise_features(features):
 def get_classifier(
     classifier_type, input_size, hidden_size=64, num_layers=1, num_classes=2
 ):
+    set_random_seed(42)  # Ensure reproducibility
+
     match classifier_type.lower():
         case "lstm":
             return LSTMClassifier(input_size, hidden_size, num_layers, num_classes)
@@ -1068,64 +1128,51 @@ def run_denoise(config, pipeline, train_dataloader, val_dataloader):
     )
 
 
-def run_extract_features_and_evaluate(
-    config,
+def run_extract_features_and_normalize(
+    included_features,
     pipeline,
-    train_denoise_path,
-    val_denoise_path,
-    test_denoise_path=None,
+    denoise_path,
+    train_mean=None,
+    train_std=None
 ):
-    # Extract features
-    included_features = config["included_features"]
 
-    train_features, train_labels = run_pipeline_extract_features(
-        pipeline, train_denoise_path, included_features
+    features, labels = run_pipeline_extract_features(
+        pipeline, denoise_path, included_features
     )
-    train_features_ts = torch.stack(train_features)
-    train_labels_ts = torch.tensor(train_labels)
 
-    train_features_mean = train_features_ts.mean(dim=(0, 1), keepdim=True)
-    train_features_std = train_features_ts.std(dim=(0, 1), keepdim=True)
-    train_features_ts = (train_features_ts - train_features_mean) / (
-        train_features_std + 1e-8
+    features_ts = torch.stack(features)
+    labels_ts = torch.tensor(labels)
+
+    if train_mean is None or train_std is None:
+        train_mean = features_ts.mean(dim=(0, 1), keepdim=True)
+        train_std = features_ts.std(dim=(0, 1), keepdim=True)
+
+    features_ts = (features_ts - train_mean) / (
+        train_std + 1e-8
     )  # Add small value to avoid division by zero
 
-    val_features, val_labels = run_pipeline_extract_features(
-        pipeline, val_denoise_path, included_features
-    )
-    val_features_ts = torch.stack(val_features)
-    val_features_ts = (val_features_ts - train_features_mean) / (
-        train_features_std + 1e-8
-    )  # Add small value to avoid division by zero
-    val_labels_ts = torch.tensor(val_labels)
+    return features_ts, labels_ts, train_mean, train_std
 
-    if test_denoise_path is not None:
-        test_features, test_labels = run_pipeline_extract_features(
-            pipeline, test_denoise_path, included_features
-        )
-        test_features_ts = torch.stack(test_features)
-        test_features_ts = (test_features_ts - train_features_mean) / (
-            train_features_std + 1e-8
-        )  # Add small value to avoid division by zero
-        test_labels_ts = torch.tensor(test_labels)
-    else:
-        test_features_ts = val_features_ts
-        test_labels_ts = val_labels_ts
+
+def run_train_classifier(
+    config,
+    train_features_ts,
+    train_labels_ts,
+    val_features_ts,
+    val_labels_ts,
+):
 
     logger.info(
-        f"Extracted features: train={train_features_ts.shape}, val={val_features_ts.shape}, test={test_features_ts.shape if test_denoise_path else 'N/A'}"
+        f"Extracted features: train={train_features_ts.shape}, val={val_features_ts.shape}"
     )
     logger.info(
-        f"Train labels: {train_labels_ts.shape}, Val labels: {val_labels_ts.shape}, Test labels: {test_labels_ts.shape if test_denoise_path else 'N/A'}"
+        f"Train labels: {train_labels_ts.shape}, Val labels: {val_labels_ts.shape}"
     )
     logger.info(
         f"Train features mean: {train_features_ts.mean().item()}, std: {train_features_ts.std().item()}"
     )  # Debugging information for feature normalization
     logger.info(
         f"Val features mean: {val_features_ts.mean().item()}, std: {val_features_ts.std().item()}"
-    )  # Debugging information for feature normalization
-    logger.info(
-        f"Test features mean: {test_features_ts.mean().item()}, std: {test_features_ts.std().item()}"
     )  # Debugging information for feature normalization
 
     # Initialize classifier
@@ -1181,12 +1228,37 @@ def run_extract_features_and_evaluate(
 
         trained_classifier.load_state_dict(best_model_state_dict)
 
+        current_run_id = mlflow.active_run().info.run_id # type: ignore
+
+    return trained_classifier, current_run_id
+
+def run_evaluate_classifier(
+    config,
+    trained_classifier,
+    test_features_ts,
+    test_labels_ts,
+    current_run_id,
+):
+
+    logger.info(
+        f"Extracted features: test={test_features_ts.shape}"
+    )
+    logger.info(
+        f"Test labels: {test_labels_ts.shape}"
+    )
+
+    logger.info(
+        f"Test features mean: {test_features_ts.mean().item()}, std: {test_features_ts.std().item()}"
+    )  # Debugging information for feature normalization
+
+    with mlflow.start_run(run_id=current_run_id):
+
         # Evaluate classifier
         eval_report = evaluate_classifier(
             trained_classifier,
             test_features_ts,
             test_labels_ts,
-            config["batch_size"] * 2,
+            config["batch_size"] * 4,
             config["device"],
         )
 
@@ -1251,11 +1323,20 @@ def run_experiment(base_config, run_configs):
                 device=merged_config["device"],
             )
 
-            denoise_paths = run_denoise(
+            train_denoise_path, val_denoise_path = run_denoise(
                 merged_config, pipeline, train_dataloader, test_dataloader
             )
-            eval_report = run_extract_features_and_evaluate(
-                merged_config, pipeline, *denoise_paths
+            train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
+                merged_config["included_features"], pipeline, train_denoise_path
+            )
+            val_features_ts, val_labels_ts, _, _ = run_extract_features_and_normalize(
+                merged_config["included_features"], pipeline, val_denoise_path, train_mean, train_std
+            )
+            classifier, run_id = run_train_classifier(
+                merged_config, train_features_ts, train_labels_ts, val_features_ts, val_labels_ts
+            )
+            eval_report = run_evaluate_classifier(
+                merged_config, classifier, val_features_ts, val_labels_ts, run_id
             )
             reports.append(eval_report)
 
@@ -1271,7 +1352,7 @@ def run_experiment(base_config, run_configs):
             device=base_config["device"],
         )
 
-        denoise_paths = run_denoise(
+        train_denoise_path, val_denoise_path = run_denoise(
             base_config, pipeline, train_dataloader, test_dataloader
         )
 
@@ -1279,8 +1360,17 @@ def run_experiment(base_config, run_configs):
             # Merge base config with run-specific config
             merged_config = merge_configs(base_config, run_config)
 
-            eval_report = run_extract_features_and_evaluate(
-                merged_config, pipeline, *denoise_paths
+            train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
+                merged_config["included_features"], pipeline, train_denoise_path
+            )
+            val_features_ts, val_labels_ts, _, _ = run_extract_features_and_normalize(
+                merged_config["included_features"], pipeline, val_denoise_path, train_mean, train_std
+            )
+            classifier, run_id = run_train_classifier(
+                merged_config, train_features_ts, train_labels_ts, val_features_ts, val_labels_ts
+            )
+            eval_report = run_evaluate_classifier(
+                merged_config, classifier, val_features_ts, val_labels_ts, run_id
             )
             reports.append(eval_report)
 
@@ -1334,12 +1424,31 @@ def run_generalisation_experiment(base_config, run_configs):
     logger.info("Starting generalisation experiments...")
 
     for this_model_dir in model_dirs:  # pnd is pipeline_and_data
+        (
+            this_train_denoise_path,
+            this_val_denoise_path,
+        ) = model_denoise_paths[this_model_dir]
+
+        base_config["run_name"] = (
+            f"generalisation_from_{this_model_dir}"
+        )
+
+        logger.info(
+            f"Running generalisation experiment from {this_model_dir}..."
+        )
+
+        train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
+            base_config["included_features"], pipeline, this_train_denoise_path
+        )
+        val_features_ts, val_labels_ts, _, _ = run_extract_features_and_normalize(
+            base_config["included_features"], pipeline, this_val_denoise_path, train_mean, train_std
+        )
+        classifier, run_id = run_train_classifier(
+            base_config, train_features_ts, train_labels_ts, val_features_ts, val_labels_ts
+        )
+
         # inner loop to iterate over each model directory
         for that_model_dir in model_dirs:
-            (
-                this_train_denoise_path,
-                this_val_denoise_path,
-            ) = model_denoise_paths[this_model_dir]
             _, that_val_denoise_path = model_denoise_paths[that_model_dir]
 
             base_config["run_name"] = (
@@ -1351,12 +1460,11 @@ def run_generalisation_experiment(base_config, run_configs):
             )
 
             # Train classifier on this model's training data and evaluate on that model's validation data
-            eval_report = run_extract_features_and_evaluate(
-                base_config,
-                pipeline,
-                this_train_denoise_path,
-                this_val_denoise_path,
-                that_val_denoise_path,
+            test_features_ts, test_labels_ts, _, _ = run_extract_features_and_normalize(
+                base_config["included_features"], pipeline, that_val_denoise_path, train_mean, train_std
+            )
+            eval_report = run_evaluate_classifier(
+                base_config, classifier, test_features_ts, test_labels_ts, run_id
             )
 
             eval_report["original_model"] = this_model_dir
@@ -1570,6 +1678,8 @@ try:
 except ImportError:
     output_prefix = ""
     IS_ON_GOOGLE_COLAB = False
+
+EARLY_STOPPING_PATIENCE = 200
 
 
 if __name__ == "__main__":
