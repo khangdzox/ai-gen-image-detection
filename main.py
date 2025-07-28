@@ -924,9 +924,9 @@ def train_classifier(
             step=epoch + 1,
         )
 
-        if epoch - best_epoch > early_stopping_patience:
+        if epoch - best_epoch > EARLY_STOPPING_PATIENCE:
             logger.info(
-                f"Early stopping triggered at epoch {epoch + 1}, no improvement in validation loss for {early_stopping_patience} epochs."
+                f"Early stopping triggered at epoch {epoch + 1}, no improvement in validation loss for {EARLY_STOPPING_PATIENCE} epochs."
             )
             break
 
