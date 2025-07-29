@@ -543,7 +543,7 @@ def download_and_prepare_data(output_dir="", num_train_samples=-1, num_test_samp
         if issubset:
             random.seed(42)
             return random.sample(
-                os.listdir(path),
+                sorted(os.listdir(path)),
                 num_samples,
             )
         else:
@@ -784,7 +784,7 @@ def run_pipeline_extract_features(
     all_labels = []
 
     try:
-        for batch in os.listdir(denoise_path):
+        for batch in tqdm(os.listdir(denoise_path)):
             pred_noises_list, noises_list, labels = torch.load(
                 f"{denoise_path}/{batch}", weights_only=False
             )
@@ -1423,7 +1423,33 @@ def run_generalisation_experiment(base_config, run_configs):
     reports = []
     logger.info("Starting generalisation experiments...")
 
+    if os.path.exists(f"{base_config['output_dir']}/finished_models.txt"):
+        with open(f"{base_config['output_dir']}/finished_models.txt", "r") as f:
+            finished_models = set(f.read().splitlines())
+    else:
+        finished_models = set()
+
     for this_model_dir in model_dirs:  # pnd is pipeline_and_data
+        if this_model_dir in finished_models:
+            logger.info(
+                f"Skipping {this_model_dir} as it has already been processed."
+            )
+            for file in os.listdir(
+                f"{base_config['output_dir']}/reports"
+            ):
+                if file.startswith(
+                    _prefix := f"eval_report_generalisation_{this_model_dir}_to_"
+                ):
+                    logger.info(f"Loading existing report for {file}...")
+                    with open(
+                        f"{base_config['output_dir']}/reports/{file}", "r"
+                    ) as f:
+                        report = json.load(f)
+                        report["original_model"] = this_model_dir
+                        report["target_model"] = file[len(_prefix) :].split(".")[0]
+                        reports.append(report)
+            continue
+
         (
             this_train_denoise_path,
             this_val_denoise_path,
@@ -1471,6 +1497,11 @@ def run_generalisation_experiment(base_config, run_configs):
             eval_report["target_model"] = that_model_dir
 
             reports.append(eval_report)
+
+        # Save the finished model to avoid re-running
+        finished_models.add(this_model_dir)
+        with open(f"{base_config['output_dir']}/finished_models.txt", "w") as f:
+            f.writelines(f"{model_dir}\n" for model_dir in finished_models)
 
     return reports
 
