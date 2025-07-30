@@ -146,15 +146,11 @@ def plot_embedding(X_embedded, labels, title="Embedding"):
     plt.show()
 
 
-def band_energy(power, mask):
-    return (power * mask[None, None, :, :]).sum(dim=(-3, -2, -1))
-
-
 def compute_energy(x_fft):
     """
     Compute the energy in low, mid, and high frequency bands of the FFT of an image.
     Args:
-        x_fft (torch.Tensor): FFT of the image tensor, shape (C, H, W).
+        x_fft (torch.Tensor): FFT of the image tensor, shape (B, T, C, H, W).
     Returns:
         low_energy (torch.Tensor): Energy in the low frequency band.
         mid_energy (torch.Tensor): Energy in the mid frequency band.
@@ -167,7 +163,7 @@ def compute_energy(x_fft):
     power = torch.fft.fftshift(power, dim=(-2, -1))
 
     # define low/mid/high fred masks
-    C, H, W = power.shape
+    B, S, C, H, W = power.shape
     yy, xx = torch.meshgrid(
         torch.arange(H) - H // 2, torch.arange(W) - W // 2, indexing="ij"
     )
@@ -179,36 +175,38 @@ def compute_energy(x_fft):
     mid_mask = (r_norm >= 0.2) & (r_norm < 0.5)
     high_mask = r_norm >= 0.5
 
-    low_energy = band_energy(power, low_mask)
-    mid_energy = band_energy(power, mid_mask)
-    high_energy = band_energy(power, high_mask)
+    low_mask = low_mask[None, None, None, :, :].to(power.device)
+    mid_mask = mid_mask[None, None, None, :, :].to(power.device)
+    high_mask = high_mask[None, None, None, :, :].to(power.device)
+
+    low_energy = (power * low_mask).sum(dim=(2, 3, 4))
+    mid_energy = (power * mid_mask).sum(dim=(2, 3, 4))
+    high_energy = (power * high_mask).sum(dim=(2, 3, 4))
 
     return low_energy, mid_energy, high_energy
 
 
-def extract_noise_features(
+def new_extract_noise_features(
     pred_noise: torch.Tensor, noise: torch.Tensor | None, included_features: list[str]
-) -> list[torch.Tensor]:
+) -> torch.Tensor:
     """
     Extracts features from the predicted noise and optionally from the actual noise.
     Args:
-        pred_noise (torch.Tensor): The predicted noise tensor, shape (batch_size, channels, height, width).
-        noise (torch.Tensor | None): The actual noise tensor, shape (batch_size, channels, height, width).
+        pred_noise (torch.Tensor): The predicted noise tensor, shape (B, T, C, H, W).
+        noise (torch.Tensor | None): The actual noise tensor, shape (B, T, C, H, W).
         included_features (list): List of features to extract. Options are:
             - 'noise_stats': Mean, std, skewness, kurtosis, and L2 norm of the predicted noise.
             - 'noise_fft': FFT magnitude, phase, and energy in low, mid, and high frequency bands of the predicted noise.
             - 'residual_stats': Mean, std, skewness, kurtosis, and L2 norm of the residual (predicted noise - actual noise).
             - 'cos_sim': Cosine similarity between the predicted noise and the actual noise.
     Returns:
-        list[torch.Tensor]: A list of tensors containing the extracted features for each sample in the batch.
+        torch.Tensor: A tensor containing the extracted features for each sample in the batch, shape (B, T, F).
     """
-    # tensor shape: (batch_size, channels, height, width)
+    # tensor shape: (batch_size, sequence_length, channels, height, width) 8 20 4 64 64
     assert included_features, "included_features cannot be empty"
     assert all(
-        [
-            f in ["noise_stats", "noise_fft", "residual_stats", "cos_sim"]
-            for f in included_features
-        ]
+        f in ["noise_stats", "noise_fft", "residual_stats", "cos_sim"]
+        for f in included_features
     ), (
         "included_features must be one of ['noise_stats', 'noise_fft', 'residual_stats', 'cos_sim']"
     )
@@ -219,66 +217,60 @@ def extract_noise_features(
 
     residual = pred_noise - noise if noise is not None else None
 
-    batch = []
+    features = []
 
-    for i in range(pred_noise.shape[0]):
-        features = []
+    if "noise_stats" in included_features:
+        pred_flat = pred_noise.flatten(2)
 
-        if "noise_stats" in included_features:
-            pred_mean = pred_noise[i].mean().item()
-            pred_std = pred_noise[i].std().item()
-            pred_skew = scipy.stats.skew(pred_noise[i].flatten().cpu().numpy()).item()
-            pred_kurtosis = scipy.stats.kurtosis(
-                pred_noise[i].flatten().cpu().numpy()
-            ).item()
-            pred_l2 = torch.linalg.norm(pred_noise[i]).item()
+        pred_mean = pred_flat.mean(dim=2)
+        pred_std = pred_flat.std(dim=2)
+        pred_l2 = torch.linalg.norm(pred_flat, dim=2)
 
-            features += [pred_mean, pred_std, pred_skew, pred_kurtosis, pred_l2]
+        pred_np = pred_flat.cpu().numpy()
+        pred_skew = torch.from_numpy(scipy.stats.skew(pred_np, axis=2)).to(pred_noise.device, dtype=pred_mean.dtype)
+        pred_kurt = torch.from_numpy(scipy.stats.kurtosis(pred_np, axis=2)).to(pred_noise.device, dtype=pred_mean.dtype)
 
-        if "noise_fft" in included_features:
-            pred_fft = torch.fft.fft2(pred_noise[i], norm="ortho")
-            pred_fft_magnitude = torch.abs(pred_fft).mean().item()
-            pred_fft_phase = torch.angle(pred_fft).mean().item()
-            pred_fft_low_energy, pred_fft_mid_energy, pred_fft_high_energy = (
-                compute_energy(pred_fft)
-            )
+        features += [pred_mean, pred_std, pred_l2, pred_skew, pred_kurt]
 
-            features += [
-                pred_fft_magnitude,
-                pred_fft_phase,
-                pred_fft_low_energy,
-                pred_fft_mid_energy,
-                pred_fft_high_energy,
-            ]
+    if "noise_fft" in included_features:
+        pred_fft = torch.fft.fft2(pred_noise, norm="ortho")
+        pred_fft_mag = torch.abs(pred_fft).mean(dim=(2, 3, 4))
+        pred_fft_phase = torch.angle(pred_fft).mean(dim=(2, 3, 4))
+        pred_fft_low_energy, pred_fft_mid_energy, pred_fft_high_energy = compute_energy(pred_fft)
 
-        if "residual_stats" in included_features and residual is not None:
-            residual_mean = residual[i].mean().item()
-            residual_std = residual[i].std().item()
-            residual_skew = scipy.stats.skew(residual[i].flatten().cpu().numpy())
-            residual_kurtosis = scipy.stats.kurtosis(
-                residual[i].flatten().cpu().numpy()
-            )
-            residual_l2 = torch.norm(residual[i]).item()
+        features += [
+            pred_fft_mag,
+            pred_fft_phase,
+            pred_fft_low_energy,
+            pred_fft_mid_energy,
+            pred_fft_high_energy,
+        ]
 
-            features += [
-                residual_mean,
-                residual_std,
-                residual_skew,
-                residual_kurtosis,
-                residual_l2,
-            ]
+    if "residual_stats" in included_features and residual is not None:
+        residual_flat = residual.flatten(2)
 
-        if "cos_sim" in included_features and noise is not None:
-            cosine_sim = torch.nn.functional.cosine_similarity(
-                pred_noise[i].flatten(), noise[i].flatten(), dim=0
-            ).item()
+        residual_mean = residual_flat.mean(dim=2)
+        residual_std = residual_flat.std(dim=2)
+        residual_l2 = torch.linalg.norm(residual_flat, dim=2)
 
-            features += [cosine_sim]
+        residual_np = residual_flat.cpu().numpy()
+        residual_skew = torch.from_numpy(scipy.stats.skew(residual_np, axis=2)).to(pred_noise.device, dtype=residual_mean.dtype)
+        residual_kurt = torch.from_numpy(scipy.stats.kurtosis(residual_np, axis=2)).to(pred_noise.device, dtype=residual_mean.dtype)
 
-        batch.append(torch.tensor(features))
+        features += [residual_mean, residual_std, residual_l2, residual_skew, residual_kurt]
 
-    return batch
+    if "cos_sim" in included_features and noise is not None:
+        pred_flat = pred_noise.flatten(2)
+        noise_flat = noise.flatten(2)
 
+        cos_sim = torch.nn.functional.cosine_similarity(pred_flat, noise_flat, dim=2)
+
+        features += [cos_sim]
+
+    # Stack all features along the last dimension
+    stacked_features = torch.stack(features, dim=2)
+
+    return stacked_features
 
 class MyPipeline:
     def __init__(
@@ -328,8 +320,8 @@ class MyPipeline:
             batch (Tensor): A batch of images, shape (batch_size, channels, height, width).
         Returns:
             tuple: A tuple containing:
-                - pred_noises_list (list[Tensor]): List of predicted noises for each timestep.
-                - noises_list (list[Tensor]): List of input noises for each timestep.
+                - pred_noises_ts (Tensor): Tensor of predicted noises for each timestep, shape (B, T, C, H, W).
+                - noises_ts (Tensor): Tensor of input noises for each timestep, shape (B, T, C, H, W).
         """
         batch = batch.to(self.device)
 
@@ -362,44 +354,33 @@ class MyPipeline:
                 noises_pred = self.unet(lats, t, batch_text_embeddings).sample
                 pred_noises_list.append(noises_pred)
 
-        return pred_noises_list, noises_list
+        pred_noises_ts, noises_ts = torch.stack(pred_noises_list), torch.stack(noises_list)
+        pred_noises_ts = pred_noises_ts.permute(1, 0, 2, 3, 4)  # (B, T, C, H, W)
+        noises_ts = noises_ts.permute(1, 0, 2, 3, 4)  # (B, T, C, H, W)
+
+        return pred_noises_ts, noises_ts
 
     def extract_features(
         self,
-        pred_noises_list,
-        noises_list,
+        pred_noises_ts,
+        noises_ts=None,
         included_features=["noise_stats", "noise_fft", "residual_stats", "cos_sim"],
     ):
         """
         Extracts features from the predicted noises and actual noises.
 
-        Caution: This method assumes that the 'pred_noises_list' and 'noises_list' are of the same batch. This method will
-        transform the input from a Tensor for each batch to a Tensor for each sample in the batch.
-
-        Preferably, the input should be the output of the '__call__' method of this class for each invocation.
         Args:
-            pred_noises_list (list[Tensor]): List of predicted noises for each timestep.
-            noises_list (list[Tensor]): List of actual noises for each timestep.
+            pred_noises_ts (Tensor): Tensor of predicted noises for each timestep, shape (B, T, C, H, W).
+            noises_ts (Tensor): Tensor of actual noises for each timestep, shape (B, T, C, H, W).
             included_features (list): List of features to extract. Options are:
                 - 'noise_stats': Mean, std, skewness, kurtosis, and L2 norm of the predicted noise.
                 - 'noise_fft': FFT magnitude, phase, and energy in low, mid, and high frequency bands of the predicted noise.
                 - 'residual_stats': Mean, std, skewness, kurtosis, and L2 norm of the residual (predicted noise - actual noise).
                 - 'cos_sim': Cosine similarity between the predicted noise and the actual noise.
         Returns:
-            list[Tensor]: A list of tensors containing the sequences of extracted features for each sample in the batch
+            Tensor: A tensor containing the sequences of extracted features for each sample in the batch, shape (B, T, F).
         """
-        extracted_features = []
-
-        if not noises_list:
-            noises_list = [None] * len(pred_noises_list)
-
-        for pred_noises, noises in zip(pred_noises_list, noises_list):
-            features = extract_noise_features(pred_noises, noises, included_features)
-            extracted_features.append(features)
-
-        extracted_features = zip(*extracted_features)
-        extracted_features = [torch.stack(feature) for feature in extracted_features]
-        # extracted_features = torch.stack(extracted_features)
+        extracted_features = new_extract_noise_features(pred_noises_ts, noises_ts, included_features)
 
         return extracted_features
 
@@ -725,7 +706,7 @@ def remove_slash(s):
     return "_".join(s)
 
 
-def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
+def run_pipeline_denoise(pipeline: MyPipeline, dataloader, output_dir, denoise_configs):
     """Runs the pipeline to denoise images in the DataLoader.
     Args:
         pipeline: The pipeline to use for denoising.
@@ -755,9 +736,9 @@ def run_pipeline_denoise(pipeline, dataloader, output_dir, denoise_configs):
         if not os.path.exists(
             f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}/batch_{count_batches}.pt"
         ):
-            pred_noises_list, noises_list = pipeline(batch)
+            pred_noises_ts, noises_ts = pipeline(batch)
             atomic_torch_save(
-                (pred_noises_list, noises_list, labels),
+                (pred_noises_ts, noises_ts, labels),
                 f"{output_dir}/denoise_cache/{dataset_root}_{denoise_configs}/batch_{count_batches}.pt",
             )
 
@@ -785,16 +766,16 @@ def run_pipeline_extract_features(
 
     try:
         for batch in tqdm(os.listdir(denoise_path)):
-            pred_noises_list, noises_list, labels = torch.load(
+            pred_noises_ts, noises_ts, labels = torch.load(
                 f"{denoise_path}/{batch}", weights_only=False
             )
             features = pipeline.extract_features(
-                pred_noises_list, noises_list, included_features
+                pred_noises_ts, noises_ts, included_features
             )
-            all_features.extend(features)
-            all_labels.extend(labels.tolist())
+            all_features.append(features)
+            all_labels.append(labels)
 
-            del pred_noises_list, noises_list, labels
+            del pred_noises_ts, noises_ts, labels
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -802,7 +783,7 @@ def run_pipeline_extract_features(
         logger.error(f"Error extracting features: {e}")
         raise e
 
-    return all_features, all_labels
+    return torch.concat(all_features), torch.concat(all_labels)
 
 
 def train_classifier(
@@ -1136,12 +1117,9 @@ def run_extract_features_and_normalize(
     train_std=None
 ):
 
-    features, labels = run_pipeline_extract_features(
+    features_ts, labels_ts = run_pipeline_extract_features(
         pipeline, denoise_path, included_features
     )
-
-    features_ts = torch.stack(features)
-    labels_ts = torch.tensor(labels)
 
     if train_mean is None or train_std is None:
         train_mean = features_ts.mean(dim=(0, 1), keepdim=True)
@@ -1642,8 +1620,8 @@ def main(config_path):
     if IS_ON_GOOGLE_COLAB:
         datadir_map = download_and_prepare_data(
             output_dir=".",
-            num_train_samples=400,
-            num_test_samples=100,
+            num_train_samples=config["x_train_samples"],
+            num_test_samples=config["x_test_samples"],
         )
     else:
         datadir_map = download_and_prepare_data(
@@ -1710,7 +1688,7 @@ except ImportError:
     output_prefix = ""
     IS_ON_GOOGLE_COLAB = False
 
-EARLY_STOPPING_PATIENCE = 200
+EARLY_STOPPING_PATIENCE = 20
 
 
 if __name__ == "__main__":
@@ -1728,6 +1706,6 @@ if __name__ == "__main__":
     # for exp_file in os.listdir("/content/drive/MyDrive/mypipeline_exps_confs/exps/others"):
     #     main(f"/content/drive/MyDrive/mypipeline_exps_confs/exps/others/{exp_file}")
 
-    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/others/full_dataset_exp_colab.yaml")
+    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/others/full_dataset_exp.yaml")
     # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp_sd15.yaml")
     # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp_sd21.yaml")
