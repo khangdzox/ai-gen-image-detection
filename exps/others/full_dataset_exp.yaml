@@ -19,53 +19,107 @@ base:
   num_classes: 2
 
   batch_size: 8
-  epochs: 50
-  lr: 1.e-3
-  weight_decay: 1.e-5
+  epochs: 200
+  lr: 1.e-5
+  weight_decay: 1.e-7
 
 runs:
 
-  - run_name: ns_nfft_3l_200e
-    num_layers: 3
-    epochs: 200
+  - run_name: lstm_ns_nfft
+    classifier_type: lstm
     included_features:
       - noise_stats
       - noise_fft
 
-  - run_name: ns_rs_cs_3l_200e
-    num_layers: 3
-    epochs: 200
+  - run_name: lstm_ns_rs_cs
+    classifier_type: lstm
     included_features:
       - noise_stats
       - residual_stats
       - cos_sim
 
-  - run_name: ns_nfft_cs_3l_200e
-    num_layers: 3
-    epochs: 200
+  - run_name: lstm_ns_nfft_cs
+    classifier_type: lstm
     included_features:
       - noise_stats
       - noise_fft
       - cos_sim
 
-  - run_name: ns_nfft_1l_50e
-    num_layers: 1
-    epochs: 50
+  - run_name: gru_ns_nfft
+    classifier_type: gru
     included_features:
       - noise_stats
       - noise_fft
 
-  - run_name: ns_rs_cs_1l_50e
-    num_layers: 1
-    epochs: 50
+  - run_name: gru_ns_rs_cs
+    classifier_type: gru
     included_features:
       - noise_stats
       - residual_stats
       - cos_sim
 
-  - run_name: ns_nfft_cs_1l_50e
-    num_layers: 1
-    epochs: 50
+  - run_name: gru_ns_nfft_cs
+    classifier_type: gru
+    included_features:
+      - noise_stats
+      - noise_fft
+      - cos_sim
+
+  - run_name: transformer_ns_nfft
+    classifier_type: transformer
+    included_features:
+      - noise_stats
+      - noise_fft
+
+  - run_name: transformer_ns_rs_cs
+    classifier_type: transformer
+    included_features:
+      - noise_stats
+      - residual_stats
+      - cos_sim
+
+  - run_name: transformer_ns_nfft_cs
+    classifier_type: lstm
+    included_features:
+      - noise_stats
+      - noise_fft
+      - cos_sim
+
+  - run_name: first_ns_nfft
+    classifier_type: first
+    included_features:
+      - noise_stats
+      - noise_fft
+
+  - run_name: first_ns_rs_cs
+    classifier_type: first
+    included_features:
+      - noise_stats
+      - residual_stats
+      - cos_sim
+
+  - run_name: first_ns_nfft_cs
+    classifier_type: first
+    included_features:
+      - noise_stats
+      - noise_fft
+      - cos_sim
+
+  - run_name: last_ns_nfft
+    classifier_type: last
+    included_features:
+      - noise_stats
+      - noise_fft
+
+  - run_name: last_ns_rs_cs
+    classifier_type: last
+    included_features:
+      - noise_stats
+      - residual_stats
+      - cos_sim
+
+  - run_name: last_ns_nfft_cs
+    classifier_type: last
     included_features:
       - noise_stats
       - noise_fft

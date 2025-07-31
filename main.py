@@ -32,7 +32,7 @@ from tqdm.auto import tqdm
 
 CONFIG_ALLOWED_TYPE = {"generalisation", "generic"}
 CONFIG_ALLOWED_DATA_DIR = {"data", "data_x", "data_aio", "data_aio_x"}
-CONFIG_ALLOWED_CLASSIFIER_TYPE = {"lstm", "gru", "transformer"}
+CONFIG_ALLOWED_CLASSIFIER_TYPE = {"lstm", "gru", "transformer", "first", "last"}
 CONFIG_ALLOWED_DEVICE = {"cuda", "cpu"}
 CONFIG_ALLOWED_FEATURES = {"noise_stats", "noise_fft", "residual_stats", "cos_sim"}
 
@@ -470,9 +470,9 @@ class GRUClassifier(torch.nn.Module):
 class TransformerClassifier(torch.nn.Module):
     def __init__(self, input_size, hidden_size=64, num_layers=4, num_classes=2):
         super().__init__()
-        self.projector = torch.nn.Linear(input_size, hidden_size)
         encoder_layer = torch.nn.TransformerEncoderLayer(
-            d_model=hidden_size, nhead=8, batch_first=True
+            d_model=input_size, nhead=4,
+            dim_feedforward=hidden_size, batch_first=True
         )
         self.transformer = torch.nn.TransformerEncoder(
             encoder_layer, num_layers=num_layers
@@ -496,7 +496,6 @@ class TransformerClassifier(torch.nn.Module):
         torch.nn.init.zeros_(self.fc.bias)
 
     def forward(self, x):
-        x = self.projector(x)
         x = self.transformer(x)
         x = x[:, -1, :]
         x = self.dropout(x)
@@ -504,9 +503,103 @@ class TransformerClassifier(torch.nn.Module):
         return logits
 
     def embed(self, x):
-        x = self.projector(x)
         x = self.transformer(x)
         x = x[:, -1, :]
+        return x
+
+class FirstOnlyClassifier(torch.nn.Module):
+    def __init__(self, input_size, hidden_size=64, num_layers=1, num_classes=2):
+        super().__init__()
+        self.seq_1 = torch.nn.Sequential(
+            torch.nn.Linear(input_size, hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.2)
+        )
+
+        self.seq_list = []
+        for _ in range(num_layers - 1):
+            self.seq_list.append(torch.nn.Linear(hidden_size, hidden_size))
+            self.seq_list.append(torch.nn.ReLU())
+            self.seq_list.append(torch.nn.Dropout(0.2))
+        self.seq_hidden = torch.nn.Sequential(*self.seq_list)
+
+        self.fc = torch.nn.Linear(hidden_size, num_classes)
+
+        self.__init_weights()
+
+    def __init_weights(self):
+        torch.nn.init.xavier_uniform_(self.fc.weight)
+        torch.nn.init.zeros_(self.fc.bias)
+        for layer in self.seq_1:
+            if isinstance(layer, torch.nn.Linear):
+                torch.nn.init.xavier_uniform_(layer.weight)
+                torch.nn.init.zeros_(layer.bias)
+        for layer in self.seq_hidden:
+            if isinstance(layer, torch.nn.Linear):
+                torch.nn.init.xavier_uniform_(layer.weight)
+                torch.nn.init.zeros_(layer.bias)
+
+    def forward(self, x):
+        # Get only first step in sequence
+        x = x[:, 0, :]
+        x = self.seq_1(x)
+        x = self.seq_hidden(x)
+        logits = self.fc(x)
+        return logits
+
+    def embed(self, x):
+        # Get only first step in sequence
+        x = x[:, 0, :]
+        x = self.seq_1(x)
+        x = self.seq_hidden(x)
+        return x
+
+
+class LastOnlyClassifier(torch.nn.Module):
+    def __init__(self, input_size, hidden_size=64, num_layers=1, num_classes=2):
+        super().__init__()
+        self.seq_1 = torch.nn.Sequential(
+            torch.nn.Linear(input_size, hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.2)
+        )
+
+        self.seq_list = []
+        for _ in range(num_layers - 1):
+            self.seq_list.append(torch.nn.Linear(hidden_size, hidden_size))
+            self.seq_list.append(torch.nn.ReLU())
+            self.seq_list.append(torch.nn.Dropout(0.2))
+        self.seq_hidden = torch.nn.Sequential(*self.seq_list)
+
+        self.fc = torch.nn.Linear(hidden_size, num_classes)
+
+        self.__init_weights()
+
+    def __init_weights(self):
+        torch.nn.init.xavier_uniform_(self.fc.weight)
+        torch.nn.init.zeros_(self.fc.bias)
+        for layer in self.seq_1:
+            if isinstance(layer, torch.nn.Linear):
+                torch.nn.init.xavier_uniform_(layer.weight)
+                torch.nn.init.zeros_(layer.bias)
+        for layer in self.seq_hidden:
+            if isinstance(layer, torch.nn.Linear):
+                torch.nn.init.xavier_uniform_(layer.weight)
+                torch.nn.init.zeros_(layer.bias)
+
+    def forward(self, x):
+        # Get only last step in sequence
+        x = x[:, -1, :]
+        x = self.seq_1(x)
+        x = self.seq_hidden(x)
+        logits = self.fc(x)
+        return logits
+
+    def embed(self, x):
+        # Get only last step in sequence
+        x = x[:, -1, :]
+        x = self.seq_1(x)
+        x = self.seq_hidden(x)
         return x
 
 
@@ -1072,6 +1165,10 @@ def get_classifier(
             return TransformerClassifier(
                 input_size, hidden_size, num_layers, num_classes
             )
+        case "first":
+            return FirstOnlyClassifier(input_size, hidden_size, num_layers, num_classes)
+        case "last":
+            return LastOnlyClassifier(input_size, hidden_size, num_layers, num_classes)
         case _:
             raise ValueError(f"Unknown classifier type: {classifier_type}")
 
