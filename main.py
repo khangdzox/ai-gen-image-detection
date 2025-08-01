@@ -69,7 +69,9 @@ CONFIG_KEYS_REQUIRE_DENOISE = {
     "timesteps",
     "diffusion_steps",
 }
-
+CONFIG_KEYS_REQUIRE_EXTRACT = {
+    "included_features"
+}
 CONFIG_DEFAULT = {
     "experiment_name": "default_experiment",
     "data_dir": "data_aio_x",
@@ -359,30 +361,6 @@ class MyPipeline:
         noises_ts = noises_ts.permute(1, 0, 2, 3, 4)  # (B, T, C, H, W)
 
         return pred_noises_ts, noises_ts
-
-    def extract_features(
-        self,
-        pred_noises_ts,
-        noises_ts=None,
-        included_features=["noise_stats", "noise_fft", "residual_stats", "cos_sim"],
-    ):
-        """
-        Extracts features from the predicted noises and actual noises.
-
-        Args:
-            pred_noises_ts (Tensor): Tensor of predicted noises for each timestep, shape (B, T, C, H, W).
-            noises_ts (Tensor): Tensor of actual noises for each timestep, shape (B, T, C, H, W).
-            included_features (list): List of features to extract. Options are:
-                - 'noise_stats': Mean, std, skewness, kurtosis, and L2 norm of the predicted noise.
-                - 'noise_fft': FFT magnitude, phase, and energy in low, mid, and high frequency bands of the predicted noise.
-                - 'residual_stats': Mean, std, skewness, kurtosis, and L2 norm of the residual (predicted noise - actual noise).
-                - 'cos_sim': Cosine similarity between the predicted noise and the actual noise.
-        Returns:
-            Tensor: A tensor containing the sequences of extracted features for each sample in the batch, shape (B, T, F).
-        """
-        extracted_features = new_extract_noise_features(pred_noises_ts, noises_ts, included_features)
-
-        return extracted_features
 
 
 class LSTMClassifier(torch.nn.Module):
@@ -846,12 +824,11 @@ def run_pipeline_denoise(pipeline: MyPipeline, dataloader, output_dir, denoise_c
 
 
 def run_pipeline_extract_features(
-    pipeline: MyPipeline, denoise_path, included_features
+    denoise_path, included_features
 ):
     """Extracts features from the predicted noises and actual noises using the pipeline.
     Args:
-        pipeline (MyPipeline): The pipeline to use for feature extraction.
-        all_pred_noises_and_noises (list): List of tuples containing predicted noises and actual noises for each batch.
+        denoise_path (str): Path to the directory containing denoised batches.
         included_features (list): List of features to include in the extraction.
     Returns:
         list: A list of tensors containing the extracted features for each sample in the batch.
@@ -859,19 +836,46 @@ def run_pipeline_extract_features(
 
     logger.info("Extracting features from predicted noises and actual noises...")
 
+    output_dir = denoise_path.split("/denoise_cache")[0]
+    denoise_cache_folder_name = denoise_path.split("/")[-1]
+    included_features_str = "_".join(included_features)
+
+    if os.path.exists(
+        f"{output_dir}/features_cache/{denoise_cache_folder_name}/features_{included_features_str}.pt"
+    ):
+        logger.info(
+            f"Features already extracted and cached at {output_dir}/features_cache/{denoise_cache_folder_name}/features_{included_features_str}.pt"
+        )
+        return torch.load(
+            f"{output_dir}/features_cache/{denoise_cache_folder_name}/features_{included_features_str}.pt",
+            weights_only=False,
+        )
+
     all_features = []
     all_labels = []
 
+    all_batches = os.listdir(denoise_path)
+    all_batches = [batch for batch in all_batches if batch.endswith(".pt")]
+
     try:
-        for batch in tqdm(os.listdir(denoise_path)):
-            pred_noises_ts, noises_ts, labels = torch.load(
-                f"{denoise_path}/{batch}", weights_only=False
-            )
-            features = pipeline.extract_features(
+        for i in tqdm(range(0, len(all_batches), 4), desc="Extracting features"):
+            batches = all_batches[i:i + 4]
+
+            loaded_batches = [
+                torch.load(f"{denoise_path}/{batch}", weights_only=False)
+                for batch in batches
+            ]
+            pred_noises_ts, noises_ts, labels = zip(*loaded_batches)
+
+            pred_noises_ts = torch.concat(pred_noises_ts)
+            noises_ts = torch.concat(noises_ts)
+            labels = torch.concat(labels)
+
+            features = new_extract_noise_features(
                 pred_noises_ts, noises_ts, included_features
             )
-            all_features.append(features)
-            all_labels.append(labels)
+            all_features.append(features.detach().cpu())
+            all_labels.append(labels.detach().cpu())
 
             del pred_noises_ts, noises_ts, labels
             gc.collect()
@@ -881,7 +885,16 @@ def run_pipeline_extract_features(
         logger.error(f"Error extracting features: {e}")
         raise e
 
-    return torch.concat(all_features), torch.concat(all_labels)
+    all_features_ts = torch.concat(all_features).cuda()
+    all_labels_ts = torch.concat(all_labels).cuda()
+
+    os.makedirs(f"{output_dir}/features_cache/{denoise_cache_folder_name}", exist_ok=True)
+    atomic_torch_save(
+        (all_features_ts, all_labels_ts),
+        f"{output_dir}/features_cache/{denoise_cache_folder_name}/features_{included_features_str}.pt",
+    )
+
+    return all_features_ts, all_labels_ts
 
 
 def train_classifier(
@@ -1213,14 +1226,13 @@ def run_denoise(config, pipeline, train_dataloader, val_dataloader):
 
 def run_extract_features_and_normalize(
     included_features,
-    pipeline,
     denoise_path,
     train_mean=None,
     train_std=None
 ):
 
     features_ts, labels_ts = run_pipeline_extract_features(
-        pipeline, denoise_path, included_features
+        denoise_path, included_features
     )
 
     if train_mean is None or train_std is None:
@@ -1432,10 +1444,10 @@ def run_experiment(base_config, run_configs):
                 merged_config, pipeline, train_dataloader, test_dataloader
             )
             train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
-                merged_config["included_features"], pipeline, train_denoise_path
+                merged_config["included_features"], train_denoise_path
             )
             val_features_ts, val_labels_ts, _, _ = run_extract_features_and_normalize(
-                merged_config["included_features"], pipeline, val_denoise_path, train_mean, train_std
+                merged_config["included_features"], val_denoise_path, train_mean, train_std
             )
             classifier, run_id = run_train_classifier(
                 merged_config, train_features_ts, train_labels_ts, val_features_ts, val_labels_ts
@@ -1491,10 +1503,10 @@ def run_experiment(base_config, run_configs):
                 continue
 
             train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
-                merged_config["included_features"], pipeline, train_denoise_path
+                merged_config["included_features"], train_denoise_path
             )
             val_features_ts, val_labels_ts, _, _ = run_extract_features_and_normalize(
-                merged_config["included_features"], pipeline, val_denoise_path, train_mean, train_std
+                merged_config["included_features"], val_denoise_path, train_mean, train_std
             )
             classifier, run_id = run_train_classifier(
                 merged_config, train_features_ts, train_labels_ts, val_features_ts, val_labels_ts
@@ -1601,10 +1613,10 @@ def run_generalisation_experiment(base_config, run_configs):
         )
 
         train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
-            base_config["included_features"], pipeline, this_train_denoise_path
+            base_config["included_features"], this_train_denoise_path
         )
         val_features_ts, val_labels_ts, _, _ = run_extract_features_and_normalize(
-            base_config["included_features"], pipeline, this_val_denoise_path, train_mean, train_std
+            base_config["included_features"], this_val_denoise_path, train_mean, train_std
         )
         classifier, run_id = run_train_classifier(
             base_config, train_features_ts, train_labels_ts, val_features_ts, val_labels_ts
@@ -1624,7 +1636,7 @@ def run_generalisation_experiment(base_config, run_configs):
 
             # Train classifier on this model's training data and evaluate on that model's validation data
             test_features_ts, test_labels_ts, _, _ = run_extract_features_and_normalize(
-                base_config["included_features"], pipeline, that_val_denoise_path, train_mean, train_std
+                base_config["included_features"], that_val_denoise_path, train_mean, train_std
             )
             eval_report = run_evaluate_classifier(
                 base_config, classifier, test_features_ts, test_labels_ts, run_id
@@ -1840,8 +1852,10 @@ def main(config_path):
 try:
     from google.colab import drive  # type:ignore
 
-    drive.mount("/content/drive")
-    output_prefix = "/content/drive/MyDrive/mypipeline_exps_6/"
+    if not os.path.exists("/content/drive"):
+        drive.mount("/content/drive")
+
+    output_prefix = "/content/drive/MyDrive/mypipeline_exps_7/"
     IS_ON_GOOGLE_COLAB = True
 except ImportError:
     output_prefix = ""
