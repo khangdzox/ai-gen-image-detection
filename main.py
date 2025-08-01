@@ -470,8 +470,9 @@ class GRUClassifier(torch.nn.Module):
 class TransformerClassifier(torch.nn.Module):
     def __init__(self, input_size, hidden_size=64, num_layers=4, num_classes=2):
         super().__init__()
+        self.projector = torch.nn.Linear(input_size, hidden_size)
         encoder_layer = torch.nn.TransformerEncoderLayer(
-            d_model=input_size, nhead=4,
+            d_model=hidden_size, nhead=4,
             dim_feedforward=hidden_size, batch_first=True
         )
         self.transformer = torch.nn.TransformerEncoder(
@@ -492,10 +493,13 @@ class TransformerClassifier(torch.nn.Module):
                 torch.nn.init.ones_(module.weight)
                 torch.nn.init.zeros_(module.bias)
 
+        torch.nn.init.xavier_uniform_(self.projector.weight)
+        torch.nn.init.zeros_(self.projector.bias)
         torch.nn.init.xavier_uniform_(self.fc.weight)
         torch.nn.init.zeros_(self.fc.bias)
 
     def forward(self, x):
+        x = self.projector(x)
         x = self.transformer(x)
         x = x[:, -1, :]
         x = self.dropout(x)
@@ -503,6 +507,7 @@ class TransformerClassifier(torch.nn.Module):
         return logits
 
     def embed(self, x):
+        x = self.projector(x)
         x = self.transformer(x)
         x = x[:, -1, :]
         return x
