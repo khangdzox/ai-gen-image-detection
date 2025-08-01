@@ -1387,10 +1387,35 @@ def run_experiment(base_config, run_configs):
 
     reports = []
 
+    if os.path.exists(f"{base_config['output_dir']}/finished_models.txt"):
+        with open(f"{base_config['output_dir']}/finished_models.txt", "r") as f:
+            finished_models = set(f.read().splitlines())
+    else:
+        finished_models = set()
+
     if need_denoise:
         for run_config in run_configs:
+
             # Merge base config with run-specific config
             merged_config = merge_configs(base_config, run_config)
+
+            if merged_config["run_name"] in finished_models:
+                logger.info(
+                    f"Skipping {merged_config['run_name']} as it has already been processed."
+                )
+                for file in os.listdir(
+                    f"{merged_config['output_dir']}/reports"
+                ):
+                    if file.startswith(
+                        f"eval_report_{merged_config['run_name']}"
+                    ):
+                        logger.info(f"Loading existing report for {file}...")
+                        with open(
+                            f"{merged_config['output_dir']}/reports/{file}", "r"
+                        ) as f:
+                            report = json.load(f)
+                            reports.append(report)
+                continue
 
             # Set random seeds for reproducibility
             set_random_seed(merged_config["seed"])
@@ -1420,6 +1445,13 @@ def run_experiment(base_config, run_configs):
             )
             reports.append(eval_report)
 
+            # Save the run name to finished models
+            finished_models.add(merged_config["run_name"])
+            with open(
+                f"{merged_config['output_dir']}/finished_models.txt", "w"
+            ) as f:
+                f.writelines(f"{model}\n" for model in finished_models)
+
     else:
         # Set random seeds for reproducibility
         set_random_seed(base_config["seed"])
@@ -1440,6 +1472,24 @@ def run_experiment(base_config, run_configs):
             # Merge base config with run-specific config
             merged_config = merge_configs(base_config, run_config)
 
+            if run_config["run_name"] in finished_models:
+                logger.info(
+                    f"Skipping {merged_config['run_name']} as it has already been processed."
+                )
+                for file in os.listdir(
+                    f"{merged_config['output_dir']}/reports"
+                ):
+                    if file.startswith(
+                        f"eval_report_{merged_config['run_name']}"
+                    ):
+                        logger.info(f"Loading existing report for {file}...")
+                        with open(
+                            f"{base_config['output_dir']}/reports/{file}", "r"
+                        ) as f:
+                            report = json.load(f)
+                            reports.append(report)
+                continue
+
             train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
                 merged_config["included_features"], pipeline, train_denoise_path
             )
@@ -1453,6 +1503,13 @@ def run_experiment(base_config, run_configs):
                 merged_config, classifier, val_features_ts, val_labels_ts, run_id
             )
             reports.append(eval_report)
+
+            # Save the run name to finished models
+            finished_models.add(merged_config["run_name"])
+            with open(
+                f"{merged_config['output_dir']}/finished_models.txt", "w"
+            ) as f:
+                f.writelines(f"{model}\n" for model in finished_models)
 
     return reports
 
