@@ -1406,18 +1406,16 @@ def run_experiment(base_config, run_configs):
             logger.info(
                 f"Skipping {merged_config['run_name']} as it has already been processed."
             )
-            for file in os.listdir(
+            if file := f"eval_report_{merged_config['run_name']}.json" in os.listdir(
                 f"{merged_config['output_dir']}/reports"
             ):
-                if file.startswith(
-                    f"eval_report_{merged_config['run_name']}"
-                ):
-                    logger.info(f"Loading existing report for {file}...")
-                    with open(
-                        f"{merged_config['output_dir']}/reports/{file}", "r"
-                    ) as f:
-                        report = json.load(f)
-                        reports.append(report)
+                logger.info(f"Loading existing report for {file}...")
+                with open(
+                    f"{merged_config['output_dir']}/reports/{file}", "r"
+                ) as f:
+                    report = json.load(f)
+                    reports.append(report)
+                    logger.info(report)
             continue
 
         # Set random seeds for reproducibility
@@ -1454,6 +1452,9 @@ def run_experiment(base_config, run_configs):
             f"{merged_config['output_dir']}/finished_models.txt", "w"
         ) as f:
             f.writelines(f"{model}\n" for model in finished_models)
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
     return reports
 
