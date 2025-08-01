@@ -69,9 +69,6 @@ CONFIG_KEYS_REQUIRE_DENOISE = {
     "timesteps",
     "diffusion_steps",
 }
-CONFIG_KEYS_REQUIRE_EXTRACT = {
-    "included_features"
-}
 CONFIG_DEFAULT = {
     "experiment_name": "default_experiment",
     "data_dir": "data_aio_x",
@@ -1385,11 +1382,6 @@ def run_experiment(base_config, run_configs):
         config (dict): A configuration dictionary containing all necessary parameters.
     """
 
-    if need_denoise := bool(
-        set(run_configs[0].keys()).intersection(CONFIG_KEYS_REQUIRE_DENOISE)
-    ):
-        logger.info("Denoising is required for each run.")
-
     train_dataloader = prepare_dataloader(
         f"{base_config['data_dir']}/train", batch_size=base_config["batch_size"]
     )
@@ -1405,123 +1397,63 @@ def run_experiment(base_config, run_configs):
     else:
         finished_models = set()
 
-    if need_denoise:
-        for run_config in run_configs:
+    for run_config in run_configs:
 
-            # Merge base config with run-specific config
-            merged_config = merge_configs(base_config, run_config)
+        # Merge base config with run-specific config
+        merged_config = merge_configs(base_config, run_config)
 
-            if merged_config["run_name"] in finished_models:
-                logger.info(
-                    f"Skipping {merged_config['run_name']} as it has already been processed."
-                )
-                for file in os.listdir(
-                    f"{merged_config['output_dir']}/reports"
+        if merged_config["run_name"] in finished_models:
+            logger.info(
+                f"Skipping {merged_config['run_name']} as it has already been processed."
+            )
+            for file in os.listdir(
+                f"{merged_config['output_dir']}/reports"
+            ):
+                if file.startswith(
+                    f"eval_report_{merged_config['run_name']}"
                 ):
-                    if file.startswith(
-                        f"eval_report_{merged_config['run_name']}"
-                    ):
-                        logger.info(f"Loading existing report for {file}...")
-                        with open(
-                            f"{merged_config['output_dir']}/reports/{file}", "r"
-                        ) as f:
-                            report = json.load(f)
-                            reports.append(report)
-                continue
+                    logger.info(f"Loading existing report for {file}...")
+                    with open(
+                        f"{merged_config['output_dir']}/reports/{file}", "r"
+                    ) as f:
+                        report = json.load(f)
+                        reports.append(report)
+            continue
 
-            # Set random seeds for reproducibility
-            set_random_seed(merged_config["seed"])
-
-            # Initialize pipeline
-            pipeline = prepare_pipeline(
-                hf_repo=merged_config["hf_repo"],
-                total_timesteps=merged_config["timesteps"],
-                diffusion_steps=merged_config["diffusion_steps"],
-                device=merged_config["device"],
-            )
-
-            train_denoise_path, val_denoise_path = run_denoise(
-                merged_config, pipeline, train_dataloader, test_dataloader
-            )
-            train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
-                merged_config["included_features"], train_denoise_path
-            )
-            val_features_ts, val_labels_ts, _, _ = run_extract_features_and_normalize(
-                merged_config["included_features"], val_denoise_path, train_mean, train_std
-            )
-            classifier, run_id = run_train_classifier(
-                merged_config, train_features_ts, train_labels_ts, val_features_ts, val_labels_ts
-            )
-            eval_report = run_evaluate_classifier(
-                merged_config, classifier, val_features_ts, val_labels_ts, run_id
-            )
-            reports.append(eval_report)
-
-            # Save the run name to finished models
-            finished_models.add(merged_config["run_name"])
-            with open(
-                f"{merged_config['output_dir']}/finished_models.txt", "w"
-            ) as f:
-                f.writelines(f"{model}\n" for model in finished_models)
-
-    else:
         # Set random seeds for reproducibility
-        set_random_seed(base_config["seed"])
+        set_random_seed(merged_config["seed"])
 
         # Initialize pipeline
         pipeline = prepare_pipeline(
-            hf_repo=base_config["hf_repo"],
-            total_timesteps=base_config["timesteps"],
-            diffusion_steps=base_config["diffusion_steps"],
-            device=base_config["device"],
+            hf_repo=merged_config["hf_repo"],
+            total_timesteps=merged_config["timesteps"],
+            diffusion_steps=merged_config["diffusion_steps"],
+            device=merged_config["device"],
         )
 
         train_denoise_path, val_denoise_path = run_denoise(
-            base_config, pipeline, train_dataloader, test_dataloader
+            merged_config, pipeline, train_dataloader, test_dataloader
         )
+        train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
+            merged_config["included_features"], train_denoise_path
+        )
+        val_features_ts, val_labels_ts, _, _ = run_extract_features_and_normalize(
+            merged_config["included_features"], val_denoise_path, train_mean, train_std
+        )
+        classifier, run_id = run_train_classifier(
+            merged_config, train_features_ts, train_labels_ts, val_features_ts, val_labels_ts
+        )
+        eval_report = run_evaluate_classifier(
+            merged_config, classifier, val_features_ts, val_labels_ts, run_id
+        )
+        reports.append(eval_report)
 
-        for run_config in run_configs:
-            # Merge base config with run-specific config
-            merged_config = merge_configs(base_config, run_config)
-
-            if run_config["run_name"] in finished_models:
-                logger.info(
-                    f"Skipping {merged_config['run_name']} as it has already been processed."
-                )
-                for file in os.listdir(
-                    f"{merged_config['output_dir']}/reports"
-                ):
-                    if file.startswith(
-                        f"eval_report_{merged_config['run_name']}"
-                    ):
-                        logger.info(f"Loading existing report for {file}...")
-                        with open(
-                            f"{base_config['output_dir']}/reports/{file}", "r"
-                        ) as f:
-                            report = json.load(f)
-                            reports.append(report)
-                continue
-
-            train_features_ts, train_labels_ts, train_mean, train_std = run_extract_features_and_normalize(
-                merged_config["included_features"], train_denoise_path
-            )
-            val_features_ts, val_labels_ts, _, _ = run_extract_features_and_normalize(
-                merged_config["included_features"], val_denoise_path, train_mean, train_std
-            )
-            classifier, run_id = run_train_classifier(
-                merged_config, train_features_ts, train_labels_ts, val_features_ts, val_labels_ts
-            )
-            eval_report = run_evaluate_classifier(
-                merged_config, classifier, val_features_ts, val_labels_ts, run_id
-            )
-            reports.append(eval_report)
-
-            # Save the run name to finished models
-            finished_models.add(merged_config["run_name"])
-            with open(
-                f"{merged_config['output_dir']}/finished_models.txt", "w"
-            ) as f:
-                f.writelines(f"{model}\n" for model in finished_models)
+        # Save the run name to finished models
+        finished_models.add(merged_config["run_name"])
+        with open(
+            f"{merged_config['output_dir']}/finished_models.txt", "w"
+        ) as f:
+            f.writelines(f"{model}\n" for model in finished_models)
 
     return reports
 
@@ -1861,7 +1793,7 @@ except ImportError:
     output_prefix = ""
     IS_ON_GOOGLE_COLAB = False
 
-EARLY_STOPPING_PATIENCE = 20
+EARLY_STOPPING_PATIENCE = 50
 
 
 if __name__ == "__main__":
