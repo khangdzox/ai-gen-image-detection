@@ -936,8 +936,11 @@ def train_classifier(
     optimizer = torch.optim.AdamW(
         classifier.parameters(), lr=lr, weight_decay=weight_decay
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-7, cooldown=3
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-7, cooldown=3
+    # )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=10, T_mult=2, eta_min=1e-7
     )
     criterion = torch.nn.CrossEntropyLoss()
 
@@ -991,7 +994,8 @@ def train_classifier(
                 val_correct += (preds == labels).sum().item()
                 val_total += labels.size(0)
 
-        scheduler.step(val_running_loss / val_total)
+        # scheduler.step(val_running_loss / val_total)
+        scheduler.step()
 
         if val_running_loss / val_total < best_eval_loss:
             best_eval_loss = val_running_loss / val_total
@@ -1406,7 +1410,7 @@ def run_experiment(base_config, run_configs):
             logger.info(
                 f"Skipping {merged_config['run_name']} as it has already been processed."
             )
-            if file := f"eval_report_{merged_config['run_name']}.json" in os.listdir(
+            if (file := f"eval_report_{merged_config['run_name']}.json") in os.listdir(
                 f"{merged_config['output_dir']}/reports"
             ):
                 logger.info(f"Loading existing report for {file}...")
