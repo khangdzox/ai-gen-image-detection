@@ -34,10 +34,14 @@ pip install torch==2.6.0 torchvision>=0.21.0 --index-url https://download.pytorc
 
 ## Usage
 
+### Test connection to MLFlow
+
 Test connection to MLFlow with the mlflow_test.py file:
 ```bash
 python mlflow_test.py
 ```
+
+### Run experiments
 
 Run the pipeline using the following command:
 
@@ -53,3 +57,21 @@ python main.py exps/generalisation/generalisation_exp_sd21.yaml
 ```
 
 A batch size of 8 used nearly all 15GB GPU memory on the Google Colab T4 GPU.
+
+### Change dataset download path
+
+To change the dataset download path, change the KAGGLEHUB_CACHE environment variable.
+
+```bash
+export KAGGLEHUB_CACHE=/path/to/folder
+```
+
+### Change experiment output path
+
+To change the experiment output path, input a directory prefix in the command line.
+
+```bash
+python main.py path/to/config.yaml --dir-prefix /path/to/output/
+```
+
+The script will change the output directory to the specified prefix (`/path/to/output/{config[output_dir]}`)

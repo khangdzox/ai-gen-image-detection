@@ -1605,15 +1605,17 @@ def merge_configs(base_config, experiment_config):
     return merged_config
 
 
-def normalise_config(config):
+def normalise_config(config, dir_prefix=""):
     """Normalises the configuration dictionary.
     Args:
         config (dict): The configuration dictionary to normalise.
     Returns:
         dict: The normalised configuration dictionary.
     """
-    if IS_ON_GOOGLE_COLAB and "output_dir" in config:
-        config["output_dir"] = f"{output_prefix}{config['output_dir']}"
+    if "output_dir" in config:
+        config["output_dir"] = os.path.join(
+            dir_prefix, config["output_dir"]
+        )
 
     if IS_ON_GOOGLE_COLAB and "experiment_name" in config:
         config["experiment_name"] = f"{config['experiment_name']}_colab"
@@ -1705,7 +1707,7 @@ def validate_config(config):
             raise ValueError(f"{e} at run {i}")
 
 
-def main(config_path):
+def main(config_path, dir_prefix):
     """Main function to run an experiment.
     Args:
         config (dict): A configuration dictionary containing all necessary parameters.
@@ -1717,7 +1719,7 @@ def main(config_path):
 
     config = merge_configs(CONFIG_DEFAULT, config)
 
-    config = normalise_config(config)
+    config = normalise_config(config, dir_prefix)
 
     mlflow.set_experiment(config["experiment_name"])
 
@@ -1792,10 +1794,9 @@ try:
     if not os.path.exists("/content/drive"):
         drive.mount("/content/drive")
 
-    output_prefix = "/content/drive/MyDrive/mypipeline_exps_7/"
     IS_ON_GOOGLE_COLAB = True
+
 except ImportError:
-    output_prefix = ""
     IS_ON_GOOGLE_COLAB = False
 
 EARLY_STOPPING_PATIENCE = 50
@@ -1804,18 +1805,19 @@ EARLY_STOPPING_PATIENCE = 50
 if __name__ == "__main__":
     parser = ArgumentParser(prog="MyPipeline Experiment")
     parser.add_argument("config")
+    parser.add_argument("--dir-prefix", type=str, default="", help="Prefix for output directory")
 
     args = parser.parse_args()
 
-    main(args.config)
+    main(args.config, args.dir_prefix)
 
     # Quick code for running on Google Colab
 
-    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp.yaml")
+    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp.yaml", "/content/drive/MyDrive/mypipeline_exps_7/")
 
     # for exp_file in os.listdir("/content/drive/MyDrive/mypipeline_exps_confs/exps/others"):
-    #     main(f"/content/drive/MyDrive/mypipeline_exps_confs/exps/others/{exp_file}")
+    #     main(f"/content/drive/MyDrive/mypipeline_exps_confs/exps/others/{exp_file}", "/content/drive/MyDrive/mypipeline_exps_7/")
 
-    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/others/full_dataset_exp.yaml")
-    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp_sd15.yaml")
-    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp_sd21.yaml")
+    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/others/full_dataset_exp.yaml", "/content/drive/MyDrive/mypipeline_exps_7/")
+    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp_sd15.yaml", "/content/drive/MyDrive/mypipeline_exps_7/")
+    # main("/content/drive/MyDrive/mypipeline_exps_confs/exps/generalisation/generalisation_exp_sd21.yaml", "/content/drive/MyDrive/mypipeline_exps_7/")
