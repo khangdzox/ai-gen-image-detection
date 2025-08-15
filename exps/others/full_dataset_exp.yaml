@@ -45,6 +45,14 @@ runs:
       - noise_fft
       - cos_sim
 
+  - run_name: lstm_ns_nfft_rs_cs
+    classifier_type: lstm
+    included_features:
+      - noise_stats
+      - noise_fft
+      - residual_stats
+      - cos_sim
+
   - run_name: gru_ns_nfft
     classifier_type: gru
     included_features:
@@ -65,6 +73,14 @@ runs:
       - noise_fft
       - cos_sim
 
+  - run_name: gru_ns_nfft_rs_cs
+    classifier_type: gru
+    included_features:
+      - noise_stats
+      - noise_fft
+      - residual_stats
+      - cos_sim
+
   - run_name: transformer_ns_nfft
     classifier_type: transformer
     included_features:
@@ -79,10 +95,18 @@ runs:
       - cos_sim
 
   - run_name: transformer_ns_nfft_cs
-    classifier_type: lstm
+    classifier_type: transformer
     included_features:
       - noise_stats
       - noise_fft
+      - cos_sim
+
+  - run_name: transformer_ns_nfft_rs_cs
+    classifier_type: transformer
+    included_features:
+      - noise_stats
+      - noise_fft
+      - residual_stats
       - cos_sim
 
   - run_name: first_ns_nfft
@@ -105,6 +129,14 @@ runs:
       - noise_fft
       - cos_sim
 
+  - run_name: first_ns_nfft_rs_cs
+    classifier_type: first
+    included_features:
+      - noise_stats
+      - noise_fft
+      - residual_stats
+      - cos_sim
+
   - run_name: last_ns_nfft
     classifier_type: last
     included_features:
@@ -123,4 +155,12 @@ runs:
     included_features:
       - noise_stats
       - noise_fft
+      - cos_sim
+
+  - run_name: last_ns_nfft_rs_cs
+    classifier_type: last
+    included_features:
+      - noise_stats
+      - noise_fft
+      - residual_stats
       - cos_sim
