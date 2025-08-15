@@ -103,28 +103,28 @@ logger.setLevel(logging.INFO)  # Set the desired logging level
 # Prevent propagation to the root logger
 logger.propagate = False
 
-# Check if handlers already exist to avoid duplicate logs in Colab
-if not logger.handlers:
-    # Create a file handler
-    file_handler = logging.FileHandler("mypipeline.log", mode="a", encoding="utf-8")
-    file_handler.setLevel(logging.INFO)
+def add_handlers(filename):
+    # Check if handlers already exist to avoid duplicate logs in Colab
+    if not logger.handlers:
+        # Create a file handler
+        file_handler = logging.FileHandler(filename, mode="a", encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
 
-    # Create a stream handler for stdout
-    stdout = logging.StreamHandler()
-    stdout.setLevel(logging.INFO)
+        # Create a stream handler for stdout
+        stdout = logging.StreamHandler()
+        stdout.setLevel(logging.INFO)
 
-    # Create a formatter
-    formatter = logging.Formatter(
-        fmt="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
-    )
-    file_handler.setFormatter(formatter)
-    stdout.setFormatter(formatter)
+        # Create a formatter
+        formatter = logging.Formatter(
+            fmt="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+        )
+        file_handler.setFormatter(formatter)
+        stdout.setFormatter(formatter)
 
-    # Add the handler to the logger
-    logger.addHandler(file_handler)
-    logger.addHandler(stdout)
+        # Add the handler to the logger
+        logger.addHandler(file_handler)
+        logger.addHandler(stdout)
 
-logger.info("################# Starting mypipeline... #################")
 
 mlflow.set_tracking_uri("http://103.21.1.103:25000")
 os.environ["AWS_ACCESS_KEY_ID"] = "khangvo3103"
@@ -1724,11 +1724,15 @@ def main(config_path, dir_prefix):
 
     config = normalise_config(config, dir_prefix)
 
+    os.makedirs(config["output_dir"], exist_ok=True)
+
+    add_handlers(f"{config['output_dir']}/mypipeline.log")
+
+    logger.info("################# Starting mypipeline... #################")
+
     mlflow.set_experiment(config["experiment_name"])
 
     logger.info(f"Executing config: {pformat(config, sort_dicts=False)}")
-
-    os.makedirs(config["output_dir"], exist_ok=True)
 
     if IS_ON_GOOGLE_COLAB:
         datadir_map = download_and_prepare_data(
@@ -1788,7 +1792,7 @@ def main(config_path, dir_prefix):
         with mlflow.start_run(
             run_name=f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         ):
-            mlflow.log_artifact("mypipeline.log")
+            mlflow.log_artifact(f"{config['output_dir']}/mypipeline.log")
 
 
 try:
