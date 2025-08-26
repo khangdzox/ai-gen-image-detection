@@ -126,10 +126,10 @@ def add_handlers(filename):
         logger.addHandler(stdout)
 
 
-mlflow.set_tracking_uri("http://103.21.1.103:25000")
+mlflow.set_tracking_uri("http://khangdzox.duckdns.org:25000")
 os.environ["AWS_ACCESS_KEY_ID"] = "khangvo3103"
 os.environ["AWS_SECRET_ACCESS_KEY"] = "vk3103@minio"
-os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://103.21.1.103:25001"
+os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://khangdzox.duckdns.org:25001"
 
 
 def plot_embedding(X_embedded, labels, title="Embedding"):
@@ -1806,7 +1806,7 @@ try:
 except ImportError:
     IS_ON_GOOGLE_COLAB = False
 
-EARLY_STOPPING_PATIENCE = 50
+EARLY_STOPPING_PATIENCE = 300
 
 
 if __name__ == "__main__":
