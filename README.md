@@ -76,3 +76,13 @@ python main.py path/to/config.yaml --dir-prefix /path/to/output/
 ```
 
 The script will change the output directory to the specified prefix (`/path/to/output/{config[output_dir]}`)
+
+### Rerun an experiment without rerunning the denoising and feature extraction
+
+To rerun an experiment without rerunning the denoising and feature extraction, use the `--rerun-exp` flag.
+
+```bash
+python main.py path/to/config.yaml --rerun-exp
+```
+
+This will clear previous results and rerun the experiment from scratch.

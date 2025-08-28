@@ -8,6 +8,7 @@ import random
 from pathlib import Path
 from pprint import pformat
 from datetime import datetime
+import shutil
 
 import kagglehub
 import matplotlib.pyplot as plt
@@ -1710,7 +1711,7 @@ def validate_config(config):
             raise ValueError(f"{e} at run {i}")
 
 
-def main(config_path, dir_prefix):
+def main(config_path, dir_prefix, rerun_exp=False):
     """Main function to run an experiment.
     Args:
         config (dict): A configuration dictionary containing all necessary parameters.
@@ -1751,6 +1752,16 @@ def main(config_path, dir_prefix):
     run_configs = config["runs"] or [{}]
     base_config["data_dir"] = datadir_map[config["data_dir"]]
     base_config["output_dir"] = config["output_dir"]
+
+    if rerun_exp:
+        logger.info("Rerun experiment flag is set. Clearing previous results...")
+        if os.path.exists(f"{base_config['output_dir']}/finished_models.txt"):
+            os.remove(f"{base_config['output_dir']}/finished_models.txt")
+        for folder in ["models", "reports"]:
+            folder_path = f"{base_config['output_dir']}/{folder}"
+            if os.path.exists(folder_path):
+                shutil.rmtree(folder_path)
+                logger.info(f"Removed folder: {folder_path}")
 
     try:
         # Run experiment
@@ -1813,10 +1824,11 @@ if __name__ == "__main__":
     parser = ArgumentParser(prog="MyPipeline Experiment")
     parser.add_argument("config")
     parser.add_argument("--dir-prefix", type=str, default="", help="Prefix for output directory")
+    parser.add_argument("--rerun-exp", action="store_true", help="Rerun the experiment even if it has been completed before")
 
     args = parser.parse_args()
 
-    main(args.config, args.dir_prefix)
+    main(args.config, args.dir_prefix, args.rerun_exp)
 
     # Quick code for running on Google Colab
 
