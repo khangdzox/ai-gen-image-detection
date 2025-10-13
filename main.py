@@ -127,13 +127,14 @@ def add_handlers(filename):
         logger.addHandler(stdout)
 
 
-mlflow.set_tracking_uri("http://khangdzox.duckdns.org:25000")
+mlflow.set_tracking_uri("http://khangdzox.ddns.net:25000")
 os.environ["AWS_ACCESS_KEY_ID"] = "khangvo3103"
 os.environ["AWS_SECRET_ACCESS_KEY"] = "vk3103@minio"
 os.environ["AWS_MAX_ATTEMPTS"] = "14"
 os.environ["AWS_RETRY_MODE"] = "standard"
-os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://khangdzox.duckdns.org:25001"
-os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] = "14"
+os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://khangdzox.ddns.net:25001"
+os.environ["MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR"] = "3"
+os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] = "9"
 
 
 def plot_embedding(X_embedded, labels, title="Embedding"):
